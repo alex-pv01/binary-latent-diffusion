@@ -98,7 +98,7 @@ def train_b_vae(bvae, dataset, num_epochs, lr):
 
 def main():
     # Instantiate and train the B-VAE
-    dataset = load_dataset("beans", split="train")[:500]['image']
+    dataset  = load_dataset("beans", split="train")[:500]['image']
 
 
     # Check if a GPU is available
@@ -117,3 +117,5 @@ def main():
 
     train_b_vae(model, dataset, num_epochs, learning_rate)
 
+if __name__== '__main__':
+    main()
