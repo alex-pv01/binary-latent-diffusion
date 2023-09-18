@@ -163,7 +163,6 @@ class AttnBlock(nn.Module):
 
         return x+h_
 
-
 class Encoder(nn.Module):
     def __init__(self, 
                  ch, 
@@ -266,7 +265,6 @@ class Encoder(nn.Module):
         h = self.conv_out(h)
 
         return h
-
 
 class Decoder(nn.Module):
     def __init__(self, 
@@ -381,7 +379,6 @@ class Decoder(nn.Module):
 
         return h
 
-
 class BinaryQuantizer(nn.Module):
     def forward(self, h):
         sigma_h = torch.sigmoid(h)
@@ -390,4 +387,3 @@ class BinaryQuantizer(nn.Module):
 
         return aux_binary
 
-    

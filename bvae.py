@@ -1,3 +1,5 @@
+import sys
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -117,5 +119,7 @@ def main():
 
     train_b_vae(model, dataset, num_epochs, learning_rate)
 
+    return 0
+
 if __name__== '__main__':
-    main()
+    sys.exit(main())
