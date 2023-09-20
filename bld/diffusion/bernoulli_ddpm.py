@@ -36,19 +36,13 @@ class BernoulliDiffusion:
         self.alphas_cumprod_next = np.append(self.alphas_cumprod[1:], 0.0)
         assert self.alphas_cumprod_prev.shape == (self.num_timesteps,)
         assert self.alphas_cumprod_next.shape == (self.num_timesteps,)
-
+        
+        # Calculations for posterior q(x_{t-1} | x_t, x_0)
         gammas = [0.5*betas[0]]
         for t in range(self.num_timesteps-1):
             gammas.append(alphas[t+1]*gammas[t] + 0.5 * betas[t+1])
         self.gammas = np.asarray(gammas)
         assert self.gammas.shape == (self.num_timesteps,)
-
-        # Calculations for diffusion q(x_t | x_{t-1}) and others
-
-        # Calculations for posterior q(x_{t-1} | x_t, x_0)
-
-        # log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain.
-
         
     def q_dist(
             self,
@@ -64,7 +58,6 @@ class BernoulliDiffusion:
         :return: the probability of x_start
         """
         pass
-
 
     def q_sample(
             self,
@@ -87,7 +80,6 @@ class BernoulliDiffusion:
     def q_posterior_dist(
             self,
             x_start,
-            x_t,
             t
     ):
         """
@@ -95,7 +87,9 @@ class BernoulliDiffusion:
             q(x_{t-1} | x_t, x_0)
         
         """
-        pass
+        prob = self.alphas_cumprod[t] * x_start + self.gammas[t]
+
+        return prob
 
     def p_dist(
             self,
