@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torch import nn
 
-class BernoulliDiffusion:
+class BernoulliDiffusion(nn.Module):
     """
     Utilities for training an sampling diffusion models based on a Bernoulli diffusion process.
 
