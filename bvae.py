@@ -8,8 +8,8 @@ from torchvision import transforms
 
 from datasets import load_dataset
 
-from models.modules import Encoder, Decoder, BinaryQuantizer
-from models.losses import TVLoss, VGGLoss, WeightedLoss
+from bld.modules.modules import Encoder, Decoder, BinaryQuantizer
+from bld.modules.losses import TVLoss, VGGLoss, WeightedLoss
 
 
 class BVAEModel(nn.Module):
@@ -101,7 +101,6 @@ def train_b_vae(bvae, dataset, num_epochs, lr):
 def main():
     # Instantiate and train the B-VAE
     dataset  = load_dataset("beans", split="train")[:500]['image']
-
 
     # Check if a GPU is available
     if torch.cuda.is_available():
