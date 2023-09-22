@@ -19,7 +19,8 @@ RUN apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/
 RUN apt-get update && apt update && apt upgrade -y && apt-get clean 
 
 # Install dependencies
-RUN apt-get install -y git 
+RUN apt-get install -y git
+RUN pip install matplotlib 
 
 # Install BLD model
 #RUN echo "Installing BLD model..." \

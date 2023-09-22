@@ -1,12 +1,12 @@
 # Pretrained models
 pretrained/
 
-# Docker
-dockers/
+# Docker runner
 docker_run.sh
 
 # Data
 dataset/
+data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
