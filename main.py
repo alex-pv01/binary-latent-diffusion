@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 from datasets import load_dataset
 
-def plot_tensor_image(tensor):
+def plot_tensor_image(tensor, name):
     # Convert the tensor to a NumPy array
     image_array = tensor.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
     
@@ -19,7 +19,7 @@ def plot_tensor_image(tensor):
     # Display the image
     plt.imshow(image_array)
     plt.axis('off')  # Turn off the axis labels and ticks
-    plt.show()
+    plt.savefig(name)
 
 def main():
     # Instantiate and train the B-VAE
@@ -52,11 +52,11 @@ def main():
 
     tensor_image = trans(img).unsqueeze(0).to(device)
 
-    plot_tensor_image(tensor_image)
+    plot_tensor_image(tensor_image, 'original.png')
 
     r_tensor_image = model.forward(tensor_image) 
 
-    plot_tensor_image(r_tensor_image)
+    plot_tensor_image(r_tensor_image, 'predicted.png')
 
     return 0
 
