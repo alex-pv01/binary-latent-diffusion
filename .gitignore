@@ -1,6 +1,10 @@
 # Pretrained models
 pretrained/
 
+# Docker
+dockers/
+docker_run.sh
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -6,6 +6,8 @@ import torch.optim as optim
 import numpy as np
 from torchvision import transforms
 
+import matplotlib.pyplot as plt
+
 from datasets import load_dataset
 
 from bld.modules.modules import Encoder, Decoder, BinaryQuantizer
@@ -113,10 +115,27 @@ def main():
         print("GPU is not available, using CPU.")
 
     model = BVAEModel(device)
-    num_epochs = 10
+    num_epochs = 0
     learning_rate = 1e-3
 
     train_b_vae(model, dataset, num_epochs, learning_rate)
+
+    image = dataset[0]
+
+    trans = transforms.ToTensor()
+
+    img = image.copy()
+    img = img.resize((32,32))
+
+    tensor_image = trans(img).unsqueeze(0)
+
+    # Convert the tensor to a NumPy array
+    image_array = tensor_image.squeeze().transpose(1, 2, 0)
+
+    # Display the image using Matplotlib
+    plt.imshow(image_array)
+    plt.axis('off')  # Turn off axis labels and ticks
+    plt.show()
 
     return 0
 
