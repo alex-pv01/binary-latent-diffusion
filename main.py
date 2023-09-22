@@ -1,6 +1,7 @@
 import sys
 
 import torch
+from torchvision import transforms
 import numpy as np
 
 from bld.autoencoder.bvae import BVAEModel, train_b_vae
@@ -37,8 +38,8 @@ def main():
 
     resolution = 128
 
-    model = BVAEModel(device, resolution)
-    num_epochs = 20
+    model = BVAEModel(device)
+    num_epochs = 5
     learning_rate = 1e-3
 
     train_b_vae(model, dataset, num_epochs, learning_rate, resolution)

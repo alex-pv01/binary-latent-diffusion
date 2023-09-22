@@ -11,7 +11,7 @@ from bld.modules.losses import TVLoss, VGGLoss, WeightedLoss
 class BVAEModel(nn.Module):
     def __init__(self, 
                  device,
-                 resolution
+                 resolution = 32
                  ):
         super(BVAEModel, self).__init__()
         self.device = device
@@ -77,6 +77,7 @@ def train_b_vae(bvae, dataset, num_epochs, lr, resolution = 32):
     opt = optim.Adam(bvae.parameters(), lr=lr)
 
     for epoch in range(num_epochs):
+        print("Epoch ", epoch)
         for image in dataset:
             trans = transforms.ToTensor()
 
@@ -91,5 +92,4 @@ def train_b_vae(bvae, dataset, num_epochs, lr, resolution = 32):
 
             loss.backward()
             opt.step()
-        print("Epoch ", epoch)
 
