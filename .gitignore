@@ -5,6 +5,9 @@ pretrained/
 dockers/
 docker_run.sh
 
+# Data
+dataset/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
