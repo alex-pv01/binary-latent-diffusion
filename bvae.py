@@ -16,28 +16,29 @@ from bld.modules.losses import TVLoss, VGGLoss, WeightedLoss
 
 class BVAEModel(nn.Module):
     def __init__(self, 
-                 device
+                 device,
+                 resolution
                  ):
         super(BVAEModel, self).__init__()
         self.device = device
-        self.encoder = Encoder(ch = 32, 
+        self.encoder = Encoder(ch = resolution, 
                          out_ch = 3, 
                          num_res_blocks = 2,
                          attn_resolutions = [16], 
                          ch_mult = (2,4),
                          in_channels = 3,
-                         resolution = 32, 
-                         z_channels = 32,
+                         resolution = resolution, 
+                         z_channels = resolution,
                          double_z = False).to(self.device)
         self.quantizer = BinaryQuantizer().to(self.device)
-        self.decoder = Decoder(ch = 32, 
+        self.decoder = Decoder(ch = resolution, 
                          out_ch = 3, 
                          num_res_blocks = 2,
                          attn_resolutions = [16], 
                          ch_mult = (2,4),
                          in_channels = 3,
-                         resolution = 32, 
-                         z_channels = 32).to(self.device)
+                         resolution = resolution, 
+                         z_channels = resolution).to(self.device)
         self.loss = WeightedLoss([VGGLoss(shift=2),
                              nn.MSELoss(),
                              TVLoss(p=1)],
@@ -78,7 +79,7 @@ class BVAEModel(nn.Module):
         return [opt_ae], []
 
 
-def train_b_vae(bvae, dataset, num_epochs, lr):
+def train_b_vae(bvae, dataset, num_epochs, lr, resolution = 32):
     opt = optim.Adam(bvae.parameters(), lr=lr)
 
     for epoch in range(num_epochs):
@@ -86,7 +87,7 @@ def train_b_vae(bvae, dataset, num_epochs, lr):
             trans = transforms.ToTensor()
 
             img = image.copy()
-            img = img.resize((32,32))
+            img = img.resize((resolution,resolution))
 
             tensor_image = trans(img).unsqueeze(0).to(bvae.device)
 
@@ -125,18 +126,20 @@ def main():
         device = torch.device("cpu")
         print("GPU is not available, using CPU.")
 
-    model = BVAEModel(device)
+    resolution = 128
+
+    model = BVAEModel(device, resolution)
     num_epochs = 20
     learning_rate = 1e-3
 
-    train_b_vae(model, dataset, num_epochs, learning_rate)
+    train_b_vae(model, dataset, num_epochs, learning_rate, resolution)
 
     image = dataset[0]
 
     trans = transforms.ToTensor()
 
     img = image.copy()
-    img = img.resize((32,32))
+    img = img.resize((resolution,resolution))
 
     tensor_image = trans(img).unsqueeze(0).to(device)
 
