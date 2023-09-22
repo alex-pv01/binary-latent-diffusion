@@ -6,7 +6,7 @@ import torch.optim as optim
 import numpy as np
 from torchvision import transforms
 
-from datasets import load_dataset
+#from datasets import load_dataset
 
 from bld.modules.modules import Encoder, Decoder, BinaryQuantizer
 from bld.modules.losses import TVLoss, VGGLoss, WeightedLoss
@@ -100,7 +100,7 @@ def train_b_vae(bvae, dataset, num_epochs, lr):
 
 def main():
     # Instantiate and train the B-VAE
-    dataset  = load_dataset("beans", split="train")[:500]['image']
+    #dataset  = load_dataset("beans", split="train")[:500]['image']
 
     # Check if a GPU is available
     if torch.cuda.is_available():
