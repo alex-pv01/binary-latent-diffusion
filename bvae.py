@@ -6,13 +6,9 @@ import torch.optim as optim
 import numpy as np
 from torchvision import transforms
 
-<<<<<<< HEAD
-#from datasets import load_dataset
-=======
 import matplotlib.pyplot as plt
 
 from datasets import load_dataset
->>>>>>> 0bebf733c48a7d624bfb73b0babab7ca29cf295b
 
 from bld.modules.modules import Encoder, Decoder, BinaryQuantizer
 from bld.modules.losses import TVLoss, VGGLoss, WeightedLoss
@@ -23,6 +19,7 @@ class BVAEModel(nn.Module):
                  device
                  ):
         super(BVAEModel, self).__init__()
+        self.device = device
         self.encoder = Encoder(ch = 32, 
                          out_ch = 3, 
                          num_res_blocks = 2,
@@ -31,8 +28,8 @@ class BVAEModel(nn.Module):
                          in_channels = 3,
                          resolution = 32, 
                          z_channels = 32,
-                         double_z = False)
-        self.quantizer = BinaryQuantizer()
+                         double_z = False).to(self.device)
+        self.quantizer = BinaryQuantizer().to(self.device)
         self.decoder = Decoder(ch = 32, 
                          out_ch = 3, 
                          num_res_blocks = 2,
@@ -40,13 +37,11 @@ class BVAEModel(nn.Module):
                          ch_mult = (2,4),
                          in_channels = 3,
                          resolution = 32, 
-                         z_channels = 32)
-        self.device = device
-
+                         z_channels = 32).to(self.device)
         self.loss = WeightedLoss([VGGLoss(shift=2),
                              nn.MSELoss(),
                              TVLoss(p=1)],
-                             [1, 40, 10])#.to(self.device)
+                             [1, 40, 10]).to(self.device)
 
     def preprocess(self, x):
         return x
@@ -79,7 +74,7 @@ class BVAEModel(nn.Module):
         lr = self.learning_rate
         opt_ae = torch.optim.Adam(list(self.encoder.parameters())+
                                   list(self.decoder.parameters()),
-                                  lr=lr, betas=(0.5, 0.9))
+                                  lr=lr, betas=(0.5, 0.9)).to(self.device)
         return [opt_ae], []
 
 
@@ -93,7 +88,7 @@ def train_b_vae(bvae, dataset, num_epochs, lr):
             img = image.copy()
             img = img.resize((32,32))
 
-            tensor_image = trans(img).unsqueeze(0)
+            tensor_image = trans(img).unsqueeze(0).to(bvae.device)
 
             opt.zero_grad()
             input_data = tensor_image
@@ -103,10 +98,22 @@ def train_b_vae(bvae, dataset, num_epochs, lr):
             opt.step()
         print("Epoch ", epoch)
 
+def plot_tensor_image(tensor):
+    # Convert the tensor to a NumPy array
+    image_array = tensor.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
+    
+    # Ensure values are in the range [0, 1] (assuming your tensor values are normalized)
+    image_array = image_array.clip(0, 1)
+    
+    # Display the image
+    plt.imshow(image_array)
+    plt.axis('off')  # Turn off the axis labels and ticks
+    plt.show()
+
 
 def main():
     # Instantiate and train the B-VAE
-    #dataset  = load_dataset("beans", split="train")[:500]['image']
+    dataset  = load_dataset("beans", split="train")[:500]['image']
 
     # Check if a GPU is available
     if torch.cuda.is_available():
@@ -119,7 +126,7 @@ def main():
         print("GPU is not available, using CPU.")
 
     model = BVAEModel(device)
-    num_epochs = 0
+    num_epochs = 20
     learning_rate = 1e-3
 
     train_b_vae(model, dataset, num_epochs, learning_rate)
@@ -131,15 +138,13 @@ def main():
     img = image.copy()
     img = img.resize((32,32))
 
-    tensor_image = trans(img).unsqueeze(0)
+    tensor_image = trans(img).unsqueeze(0).to(device)
 
-    # Convert the tensor to a NumPy array
-    image_array = tensor_image.squeeze().transpose(1, 2, 0)
+    plot_tensor_image(tensor_image)
 
-    # Display the image using Matplotlib
-    plt.imshow(image_array)
-    plt.axis('off')  # Turn off axis labels and ticks
-    plt.show()
+    r_tensor_image = model.forward(tensor_image) 
+
+    plot_tensor_image(r_tensor_image)
 
     return 0
 
