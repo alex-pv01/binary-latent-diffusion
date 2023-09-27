@@ -36,10 +36,10 @@ def main():
         device = torch.device("cpu")
         print("GPU is not available, using CPU.")
 
-    resolution = 128
+    resolution = 32
 
     model = BVAEModel(device)
-    num_epochs = 5
+    num_epochs = 20
     learning_rate = 1e-3
 
     train_b_vae(model, dataset, num_epochs, learning_rate, resolution)
