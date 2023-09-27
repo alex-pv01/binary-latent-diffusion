@@ -1,14 +1,14 @@
 # This code is based on https://github.com/GuyTevet/motion-diffusion-model/blob/main/train/train_mdm.py
 """
-Train a diffusion model on images.
+Train a Bernoulli diffusion model on images.
 """
 
 import os
 import json
 from utils.fixseed import fixseed
-from utils.parser_util import train_args
+from utils.parser_util import bdiff_train_args as train_args
 from utils import dist_util
-from train.training_loops import TrainLoop
+from train.training_loops import DiffusionTrainLoop
 from data_loaders.get_data import get_dataset_loader
 from utils.model_util import create_model_and_diffusion
 from train.train_platforms import ClearmlPlatform, TensorboardPlatform, NoPlatform  # required for the eval operation
