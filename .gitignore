@@ -1,15 +1,22 @@
 # Pretrained models
 pretrained/
 
+# Other dependencies
+t2m
+glove
+kit
+body_models
+
 # Docker runner
 docker_run.sh
+
 
 # Data
 dataset/HumanML3D
 dataset/KIT-ML
 
-# Results
-results/
+# Saves
+save/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
