@@ -5,8 +5,11 @@ pretrained/
 docker_run.sh
 
 # Data
-dataset/
-data/
+dataset/HumanML3D
+dataset/KIT-ML
+
+# Results
+results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

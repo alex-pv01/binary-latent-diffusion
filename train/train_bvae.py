@@ -35,7 +35,7 @@ def main():
     print("creating data loader...")
     data = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=args.num_frames)
 
-    print("creating model and diffusion...")
+    print("creating binary vae...")
     model, diffusion = create_model_and_diffusion(args, data)
     model.to(dist_util.dev())
     model.rot2xyz.smpl_model.eval()

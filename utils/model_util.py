@@ -1,6 +1,6 @@
-from model.mdm import MDM
-from diffusion import gaussian_diffusion as gd
-from diffusion.respace import SpacedDiffusion, space_timesteps
+from bld.autoencoder.bvae import BVAEModel
+from bld.diffusion import gaussian_diffusion as gd
+from bld.diffusion.respace import SpacedDiffusion, space_timesteps
 from utils.parser_util import get_cond_mode
 
 
@@ -14,6 +14,15 @@ def create_model_and_diffusion(args, data):
     model = MDM(**get_model_args(args, data))
     diffusion = create_gaussian_diffusion(args)
     return model, diffusion
+
+
+def create_bvae(args, data):
+    model = BVAEModel(**get_bvae_args(args, data))
+    return model
+
+
+def get_bvae_args(args, data):
+    return {}
 
 
 def get_model_args(args, data):

@@ -9,12 +9,12 @@ import blobfile as bf
 import torch
 from torch.optim import AdamW
 
-from diffusion import logger
+from bld.diffusion import logger
 from utils import dist_util
-from diffusion.fp16_util import MixedPrecisionTrainer
-from diffusion.resample import LossAwareSampler, UniformSampler
+from bld.diffusion.fp16_util import MixedPrecisionTrainer
+from bld.diffusion.resample import LossAwareSampler, UniformSampler
 from tqdm import tqdm
-from diffusion.resample import create_named_schedule_sampler
+from bld.diffusion.resample import create_named_schedule_sampler
 from data_loaders.humanml.networks.evaluator_wrapper import EvaluatorMDMWrapper
 from eval import eval_humanml, eval_humanact12_uestc
 from data_loaders.get_data import get_dataset_loader
