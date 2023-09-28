@@ -26,6 +26,11 @@ from data_loaders.get_data import get_dataset_loader
 INITIAL_LOG_LOSS_SCALE = 20.0
 
 
+class BVAETrainLoop:
+    def __init__(self):
+        pass
+
+
 class DiffusionTrainLoop:
     def __init__(self, args, train_platform, model, diffusion, data):
         self.args = args

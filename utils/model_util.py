@@ -3,6 +3,7 @@ from bld.diffusion import gaussian_diffusion as gd
 from bld.diffusion.respace import SpacedDiffusion, space_timesteps
 from utils.parser_util import get_cond_mode
 
+import torch
 
 def load_model_wo_clip(model, state_dict):
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
@@ -22,7 +23,16 @@ def create_bvae(args, data):
 
 
 def get_bvae_args(args, data):
-    return {}
+    # Check if a GPU is available
+    if torch.cuda.is_available():
+        # Set the device to the first available GPU
+        device = torch.device("cuda")
+        print("GPU is available.")
+    else:
+        # If no GPU is available, use the CPU
+        device = torch.device("cpu")
+        print("GPU is not available, using CPU.")
+    return {'device': device}
 
 
 def get_model_args(args, data):

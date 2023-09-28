@@ -8,9 +8,9 @@ import json
 from utils.fixseed import fixseed
 from utils.parser_util import bvae_train_args as train_args
 from utils import dist_util
-from train.training_loops import AutoencoderTrainLoop
+from train.training_loops import BVAETrainLoop as TrainLoop
 from data_loaders.get_data import get_dataset_loader
-from utils.model_util import create_model_and_diffusion
+from utils.model_util import create_bvae
 from train.train_platforms import ClearmlPlatform, TensorboardPlatform, NoPlatform  # required for the eval operation
 
 def main():
@@ -36,14 +36,16 @@ def main():
     data = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=args.num_frames)
 
     print("creating binary vae...")
-    model, diffusion = create_model_and_diffusion(args, data)
+    model = create_bvae(args, data)
     model.to(dist_util.dev())
-    model.rot2xyz.smpl_model.eval()
+    #model.rot2xyz.smpl_model.eval()
 
-    print('Total params: %.2fM' % (sum(p.numel() for p in model.parameters_wo_clip()) / 1000000.0))
-    print("Training...")
-    TrainLoop(args, train_platform, model, diffusion, data).run_loop()
-    train_platform.close()
+    
+
+    #print('Total params: %.2fM' % (sum(p.numel() for p in model.parameters_wo_clip()) / 1000000.0))
+    #print("Training...")
+    #TrainLoop(args, train_platform, model, data).run_loop()
+    #train_platform.close()
 
 if __name__ == "__main__":
     main()
