@@ -86,7 +86,7 @@ def train_b_vae(bvae, dataset, num_epochs, lr, resolution = 32):
 
     wandb.init(
         # set the wandb project where this run will be logged
-        project="my-awesome-project",
+        project="my-awesome-motion-project",
         
         # track hyperparameters and run metadata
         config={
@@ -116,3 +116,38 @@ def train_b_vae(bvae, dataset, num_epochs, lr, resolution = 32):
 
             wandb.log({"loss": loss})
 
+
+def train_b_vae2(bvae, dataset, num_epochs, lr, resolution = 22):
+    opt = optim.Adam(bvae.parameters(), lr=lr)
+
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="my-awesome-motion-project",
+        
+        # track hyperparameters and run metadata
+        config={
+        "learning_rate": lr,
+        "architecture": "CNN",
+        "dataset": "HumanML3D",
+        "epochs": num_epochs,
+        }
+    )
+
+    for epoch in range(num_epochs):
+        print("Epoch ", epoch)
+        for motion in dataset:
+            for frame in motion:
+                trans = transforms.ToTensor()
+
+                img = frame.copy()
+
+                tensor_image = trans(img).unsqueeze(0).to(bvae.device)
+
+                opt.zero_grad()
+                input_data = tensor_image
+                loss = bvae.training_step(input_data)
+
+                loss.backward()
+                opt.step()
+
+                wandb.log({"loss": loss})
