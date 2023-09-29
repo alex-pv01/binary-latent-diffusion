@@ -27,8 +27,76 @@ INITIAL_LOG_LOSS_SCALE = 20.0
 
 
 class BVAETrainLoop:
-    def __init__(self):
-        pass
+    def __init__(self, args, train_platform, model, data):
+        self.args = args
+        self.dataset = args.dataset
+        self.train_platform = train_platform
+        self.model = model
+        self.data = data
+        self.batch_size = args.batch_size
+        self.microbatch = args.batch_size  # deprecating this option
+        self.lr = args.lr
+        self.log_interval = args.log_interval
+        self.save_interval = args.save_interval
+        self.resume_checkpoint = args.resume_checkpoint
+        self.use_fp16 = False  # deprecating this option
+        self.fp16_scale_growth = 1e-3  # deprecating this option
+        self.weight_decay = args.weight_decay
+        self.lr_anneal_steps = args.lr_anneal_steps
+
+        self.step = 0
+        self.resume_step = 0
+        self.global_batch = self.batch_size # * dist.get_world_size()
+        self.num_steps = args.num_steps
+        self.num_epochs = self.num_steps // len(self.data) + 1
+
+        self.sync_cuda = torch.cuda.is_available()
+
+        self._load_and_sync_parameters()
+        self.mp_trainer = MixedPrecisionTrainer(
+            model=self.model,
+            use_fp16=self.use_fp16,
+            fp16_scale_growth=self.fp16_scale_growth,
+        )
+
+        self.save_dir = args.save_dir
+        self.overwrite = args.overwrite
+
+        self.opt = AdamW(
+            self.mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay
+        )
+        if self.resume_step:
+            self._load_optimizer_state()
+            # Model was resumed, either due to a restart or a checkpoint
+            # being specified at the command line.
+
+        self.device = torch.device("cpu")
+        if torch.cuda.is_available() and dist_util.dev() != 'cpu':
+            self.device = torch.device(dist_util.dev())
+
+        self.schedule_sampler_type = 'uniform'
+        self.schedule_sampler = create_named_schedule_sampler(self.schedule_sampler_type, diffusion)
+        self.eval_wrapper, self.eval_data, self.eval_gt_data = None, None, None
+        if args.dataset in ['kit', 'humanml'] and args.eval_during_training:
+            mm_num_samples = 0  # mm is super slow hence we won't run it during training
+            mm_num_repeats = 0  # mm is super slow hence we won't run it during training
+            gen_loader = get_dataset_loader(name=args.dataset, batch_size=args.eval_batch_size, num_frames=None,
+                                            split=args.eval_split,
+                                            hml_mode='eval')
+
+            self.eval_gt_data = get_dataset_loader(name=args.dataset, batch_size=args.eval_batch_size, num_frames=None,
+                                                   split=args.eval_split,
+                                                   hml_mode='gt')
+            self.eval_wrapper = EvaluatorMDMWrapper(args.dataset, dist_util.dev())
+            self.eval_data = {
+                'test': lambda: eval_humanml.get_mdm_loader(
+                    model, diffusion, args.eval_batch_size,
+                    gen_loader, mm_num_samples, mm_num_repeats, gen_loader.dataset.opt.max_motion_length,
+                    args.eval_num_samples, scale=1.,
+                )
+            }
+        self.use_ddp = False
+        self.ddp_model = self.model
 
 
 class DiffusionTrainLoop:

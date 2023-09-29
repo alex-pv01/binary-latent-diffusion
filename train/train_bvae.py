@@ -38,14 +38,12 @@ def main():
     print("creating binary vae...")
     model = create_bvae(args, data)
     model.to(dist_util.dev())
-    #model.rot2xyz.smpl_model.eval()
-
-    
+    model.rot2xyz.smpl_model.eval()
 
     #print('Total params: %.2fM' % (sum(p.numel() for p in model.parameters_wo_clip()) / 1000000.0))
-    #print("Training...")
-    #TrainLoop(args, train_platform, model, data).run_loop()
-    #train_platform.close()
+    print("Training...")
+    TrainLoop(args, train_platform, model, data).run_loop()
+    train_platform.close()
 
 if __name__ == "__main__":
     main()

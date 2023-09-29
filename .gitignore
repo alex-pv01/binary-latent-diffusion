@@ -1,5 +1,5 @@
-# Pretrained models
-pretrained/
+# Other tools
+check.py
 
 # Other dependencies
 t2m
@@ -7,9 +7,11 @@ glove
 kit
 body_models
 
+#WandB
+wandb
+
 # Docker runner
 docker_run.sh
-
 
 # Data
 dataset/HumanML3D

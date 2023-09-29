@@ -36,9 +36,9 @@ def main():
         device = torch.device("cpu")
         print("GPU is not available, using CPU.")
 
-    resolution = 32
+    resolution = 256
 
-    model = BVAEModel(device)
+    model = BVAEModel(device, resolution)
     num_epochs = 20
     learning_rate = 1e-3
 
