@@ -59,7 +59,7 @@ pandas==2.1.1
 parso @ file:///opt/conda/conda-bld/parso_1641458642106/work
 pexpect @ file:///tmp/build/80754af9/pexpect_1605563209008/work
 pickleshare @ file:///tmp/build/80754af9/pickleshare_1606932040724/work
-Pillow==9.4.0
+Pillow==10.0.1
 pkginfo @ file:///croot/pkginfo_1679431160147/work
 pluggy @ file:///tmp/build/80754af9/pluggy_1648024709248/work
 prompt-toolkit @ file:///croot/prompt-toolkit_1672387306916/work
