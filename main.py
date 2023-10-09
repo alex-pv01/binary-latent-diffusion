@@ -2,7 +2,7 @@
 Based on https://github.com/CompVis/taming-transformers/tree/master
 """
 
-import argparse, os, sys, glob, importlib
+import argparse, os, sys, glob, importlib, datetime
 from omegaconf import OmegaConf
 import numpy as np
 from PIL import Image
@@ -536,7 +536,7 @@ def main():
         print(f"accumulate_grad_batches = {accumulate_grad_batches}")
         lightning_config.trainer.accumulate_grad_batches = accumulate_grad_batches
         model.learning_rate = accumulate_grad_batches * ngpu * bs * base_lr
-        print(f"Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus) * {} (batch_size) * {:.2e} (base_lr)".format(
+        print("Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus) * {} (batch_size) * {:.2e} (base_lr)".format(
             model.learning_rate, accumulate_grad_batches, ngpu, bs, base_lr))
 
         # allow checkpoint via USR1
@@ -570,7 +570,7 @@ def main():
             try:
                 import pudb as debugger
             except ImportError:
-                import pdb as debugger:
+                import pdb as debugger
             debugger.post_mortem()
         raise
 
@@ -583,15 +583,5 @@ def main():
             os.rename(logdir, dst)
 
 
-
-
-
-
-
-
-
-
-
-
-
 if __name__ == "__main__":
+    sys.exit(main())
