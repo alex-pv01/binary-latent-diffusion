@@ -12,7 +12,7 @@ from torch.utils.data import random_split, Dataloader, Dataset
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
-from pytorch_lightning.callback import ModelCheckpoint, Callback, LearningRateMOnitor
+from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
 from pytorch_lightning.utilities import rank_zero_only
 import wandb
 
@@ -373,6 +373,214 @@ def main():
     #           params:
     #               key: value
     now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+
+    # add cwd for convenience and to make classes in this file available when running as `python main.py`
+    sys.path.append(os.getcwd())
+
+    parser = get_parser()
+    parser = Trainer.add_argparse_args(parser)
+
+    opt, unknown = parser.parse_known_args()
+    if opt.name and opt.resume:
+        raise ValueError(
+            "-n/--name and -r/--resume cannot be specified both."
+            "If you wanto to resume training in a new log folder, "
+            "use -n/--name in combination with --resume_from_checkpoint"
+        )
+    if opt.resume:
+        if not os.path.exists(opt.resume):
+            raise ValueError("Cannot find {}".format(opt.resume))
+        if os.path.isfile(opt.resume):
+            paths = opt.resume.split("/")
+            idx = len(paths)-paths[::-1].index("logs")+1
+            logdir = "/".join(paths[:idx])
+            ckpt = opt.resume
+        else:
+            assert os.path.isdir(opt.resume), opt.resume
+            logdir = opt.resume.rstrip("/")
+            ckpt = os.path.join(logdir, "checkpoint", "last.ckpt")
+        opt.resume_from_checkpoint = ckpt
+        base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml")))
+        opt.base = base_configs + opt.base
+        _tmp = logdir.split("/")
+        nowname = _tmp[_tmp.index("logs")+1]
+    else:
+        if opt.name:
+            name = "_" + opt.name
+        elif opt.base:
+            cfg_name = os.path.split(opt.base[0])[-1]
+            cfg_name = os.path.splitext(cfg_name)[0]
+            name = "_" + cfg_name
+        else:
+            name = ""
+        nowname = now + name + opt.postfix
+        logdir = os.path.join("logs", nowname)
+
+    print("Logdir: ", logdir)
+
+    ckptdir = os.path.join(logdir, "checkpoints")
+    cfgdir = os.path.join(logdir, "configs")
+    seed_everything(opt.seed)
+
+    try: 
+        # init and save configs
+        configs = [OmegaConf.load(cfg) for cfg in opt.base]
+        cli = OmegaConf.from_dotlist(unknown)
+        config = OmegaConf.merge(*configs, cli)
+        lightning_config = config.pop("lightning", OmegaConf.create())
+        # merge trainer cli with config
+        trainer_config = lightning_config.get("trainer", OmegaConf.create())
+        # default to ddp
+        trainer_config["distributed_backend"] = "ddp"
+        for k in nondefault_trainer_args(opt):
+            trainer_config[k] = getattr(opt, k)
+        if not "gpus" in trainer_config:
+            del trainer_config["distributed_backend"]
+            cpu = True
+        else:
+            gpuinfo = trainer_config["gpus"]
+            print(f"Running on GPUs {gpuinfo}")
+            cpu = False
+        trainer_opt = argparse.Namespace(**trainer_config)
+        lightning_config.trainer = trainer_config
+
+        # model
+        model = instantiate_from_config(config.model)
+
+        # trainer and callbacks
+        trainer_kwargs = dict()
+
+        default_logger_cfgs = {
+            "wandb": {
+                "target": "pytorch_lightning.loggers.WandbLogger",
+                "params": {
+                    "project": "binary_autoencoding",
+                    "name": nowname,
+                    "save_dir": logdir,
+                    "offline": opt.debug,
+                    "id": nowname,
+                }
+            },
+        }
+        default_logger_cfg = default_logger_cfgs["wandb"]
+        logger_cfg = lightning_config.logger or OmegaConf.create()
+        logger_cfg = OmegaConf.merge(default_logger_cfg, logger_cfg)
+        trainer_kwargs["logger"] = instantiate_from_config(logger_cfg)
+
+        # modelcheckpoint
+        default_modelckpt_cfg = {
+            "target": "pytorch_lightning.callbacks.ModelCheckpoint",
+            "params": {
+                "dirpath": ckptdir,
+                "filename": "{epoch:06}",
+                "verbose": True,
+                "save_last": True,
+            }
+        }
+        if hasattr(model, "monitor"):
+            print(f"Monitoring {model.monitor} as checkpoint metric.")
+            default_modelckpt_cfg["params"]["monitor"] = model.monitor
+            default_modelckpt_cfg["params"]["save_top_k"] = 3
+
+        modelckpt_cfg = lightning_config.modelcheckpoint or OmegaConf.create()
+        modelckpt_cfg = OmegaConf.merge(default_modelckpt_cfg, modelckpt_cfg)
+        trainer_kwargs["checkpoint_callback"] = instantiate_from_config(modelckpt_cfg)
+
+        # add callback which sets up log directory
+        default_callbacks_cfg = {
+            "setup_callback": {
+                "target": "main.SetupCallback",
+                "params": {
+                    "resume": opt.resume,
+                    "now": now,
+                    "logdir": logdir,
+                    "ckptdir": ckptdir,
+                    "cfgdir": cfgdir,
+                    "config": config,
+                    "lightning_config": lightning_config,
+                }
+            },
+            "image_logger": {
+                "target": "main.ImageLogger",
+                "params": {
+                    "batch_frequency": 750,
+                    "max_images": 4,
+                    "clamp": True
+                }
+            },
+            "learning_rate_logger": {
+                "target": "main.LearningRateMonitor",
+                "params": {
+                    "logging_interval": "step"
+                }
+            }
+        }
+        callbacks_cfg = lightning_config.callbacks or OmegaConf.create()
+        callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
+        trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
+
+        trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
+
+        # data
+        data = instantiate_from_config(config.data)
+        data.prepare_data()
+        data.setup()
+
+        # configure learning rate
+        bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
+        if not cpu:
+            ngpu = len(lightning_config.trainer.gpus.strip(",").split(","))
+        else:
+            ngpu: 1
+        accumulate_grad_batches = lightning_config.trainer.accumulate_grad_batches or 1
+        print(f"accumulate_grad_batches = {accumulate_grad_batches}")
+        lightning_config.trainer.accumulate_grad_batches = accumulate_grad_batches
+        model.learning_rate = accumulate_grad_batches * ngpu * bs * base_lr
+        print(f"Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus) * {} (batch_size) * {:.2e} (base_lr)".format(
+            model.learning_rate, accumulate_grad_batches, ngpu, bs, base_lr))
+
+        # allow checkpoint via USR1
+        def melk(*args, **kwargs):
+            # run all checkpoint hooks
+            if trainer.global_rank == 0:
+                print("Summoning checkpoint.")
+                ckpt_path = os.path.join(ckptdir, "last.ckpt")
+                trainer.save_checkpoint(ckpt_path)
+
+        def divein(*args, **kwargs):
+            if trainer.global_rank == 0:
+                import pudb; pudb.set_trace()
+
+        import signal
+        signal.signal(signal.SIGUSR1, melk)
+        signal.signal(signal.SIGUSR2, divein)
+
+        # run 
+        if opt.train:
+            try:
+                trainer.fit(model, data)
+            except Exception:
+                melk()
+                raise
+        if not opt.no_test and not trainer.interrupted:
+            trainer.test(model, data)
+    
+    except Exception:
+        if opt.debug and trainer.global_rank == 0:
+            try:
+                import pudb as debugger
+            except ImportError:
+                import pdb as debugger:
+            debugger.post_mortem()
+        raise
+
+    finally:
+        # move newly created debug project to debug_runs
+        if opt.debug and not opt.resume and trainer.global_rank == 0:
+            dst, name = os.path.split(logdir)
+            dst = os.path.join(dst, "debug_runs", name)
+            os.makedirs(os.path.split(dst)[0], exist_ok=True)
+            os.rename(logdir, dst)
 
 
 
