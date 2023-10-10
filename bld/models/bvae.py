@@ -54,8 +54,16 @@ class BVAEModel(pl.LightningModule):
         dec = self.decode(quant)
         return dec
     
+    def get_input(self, batch, k):
+        x = batch[k]
+        if len(x.shape) == 3:
+            x = x[..., None]
+        x = x.permute(0,3,1,2).to(memory_format=torch.contiguous_format)
+        return x.float()
+    
     def training_step(self, batch, batch_idx, optimizer_idx):
         x = self.get_input(batch, self.image_key)
+
         xrec = self(x)
 
         if optimizer_idx == 0:
@@ -89,7 +97,7 @@ class BVAEModel(pl.LightningModule):
     def configure_optimizers(self):
         lr = self.learning_rate
         opt_ae = torch.optim.Adam(list(self.encoder.parameters())+
-                                  list(self.decoder.parametets())+
+                                  list(self.decoder.parameters())+
                                   list(self.quantize.parameters())+
                                   list(self.quant_conv.parameters())+
                                   list(self.post_quant_conv.parameters()),

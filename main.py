@@ -222,7 +222,7 @@ class SetupCallback(Callback):
     def on_pretrain_routine_start(self, trainer, pl_module):
         if trainer.global_rank == 0:
             # Create logdirs and save configs
-            os.makedirs(self.logdir, exist_of=True)
+            os.makedirs(self.logdir, exist_ok=True)
             os.makedirs(self.ckptdir, exist_ok=True)
             os.makedirs(self.cfgdir, exist_ok=True)
 
@@ -230,7 +230,7 @@ class SetupCallback(Callback):
             print(self.config.pretty())
             OmegaConf.save(
                 self.config,
-                os.path.join(self.cfdgir, "{}-project.yaml".format(self.now))
+                os.path.join(self.cfgdir, "{}-project.yaml".format(self.now))
             )
 
             print("Lightning config")
@@ -291,12 +291,13 @@ class ImageLogger(Callback):
             )
 
     @rank_zero_only
-    def log_lovally(self, save_dir, split, images, global_step, current_epoch, batch_idx):
+    def log_local(self, save_dir, split, images, global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, "images", split)
         for k in images:
             grid = torchvision.utils.make_grid(images[k], nrow=4)
             grid = (grid + 1.0) / 2.0
             grid = grid.transpose(0,1).transpose(1,2).squeeze(-1)
+            grid = grid.numpy()
             grid = (grid * 255).astype(np.uint8)
             filename = "{}_gs-{:06}_e-{:06}_b-{:06}.png".format(k, global_step, current_epoch, batch_idx)
             path = os.path.join(root, filename)
@@ -318,7 +319,7 @@ class ImageLogger(Callback):
                 N = min(images[k].shape[0], self.max_images)
                 images[k] = images[k][:N]
                 if isinstance(images[k], torch.Tensor):
-                    images[k] = images[k].detach.cpu()
+                    images[k] = images[k].detach().cpu()
                     if self.clamp:
                         images[k] = torch.clamp(images[k], -1., 1.)
             self.log_local(pl_module.logger.save_dir, split, images, pl_module.global_step, pl_module.current_epoch, batch_idx)

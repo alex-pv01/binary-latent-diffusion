@@ -2,7 +2,7 @@ import bisect
 import numpy as np
 import albumentations
 from PIL import Image
-from torch.utils.data import Dataset, ConcatDataset
+from torch.utils.data import Dataset
 
 
 class ImagePaths(Dataset):

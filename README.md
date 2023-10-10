@@ -4,11 +4,16 @@ This repo pretends to be an implementation of the Binary Latent Diffusion model.
 PLEASE BE PATIENT, THIS IS STILL A WORK IN PROGRESS.
 
 ## Train Binary Autoencoder
-```python
+```
 python main.py --base configs/bvae.yaml -t True --gpus 0,1
 ```
 
 ### Resume training
-```python
+```
 python main.py --base configs/bvae.yaml --resume PATH/TO/last.ckpt -t True --gpus 0,1
+```
+
+## Get data paths
+```
+find $(pwd)/datasets/coco/train2017 -name "*.jpg" > train.txt
 ```
