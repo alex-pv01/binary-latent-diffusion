@@ -46,7 +46,7 @@ class Encoder(nn.Module):
             if i_level != self.num_resolutions - 1:
                 down.downsample = Downsample(block_in, resamp_with_conv)
                 curr_res = curr_res // 2
-            self.down.apped(down)
+            self.down.append(down)
 
         # middle
         self.mid = nn.Module()
@@ -116,7 +116,7 @@ class Decoder(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.resolution = resolution
         self.in_channels = in_channels
-        self.give_pre_end
+        self.give_pre_end = give_pre_end
 
         # compute in_ch_mult, block_in and curr_res at lowest res
         in_ch_mult = (1,) + tuple(ch_mult)

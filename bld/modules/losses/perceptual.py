@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from bld.modules.losses.lpips import LPIPS
 from bld.modules.losses.discriminator import NLayerDiscriminator, weights_init

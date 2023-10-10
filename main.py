@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 import torch
 import torchvision
-from torch.utils.data import random_split, Dataloader, Dataset
+from torch.utils.data import random_split, DataLoader, Dataset
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
@@ -153,29 +153,25 @@ class WrappedDataset(Dataset):
 
 
 class DataModuleFromConfig(pl.LightningDataModule):
-    def __init__(self, batch_size, train=None, validation=None, test=None,
-                 wrap=False, num_workers=None):
+    def __init__(self, batch_size, train=None, validation=None, test=None, wrap=False, num_workers=None):
         super().__init__()
         self.batch_size = batch_size
         self.dataset_configs = dict()
         self.num_workers = num_workers if num_workers is not None else batch_size**2
         if train is not None:
             self.dataset_configs["train"] = train
-            self.train_dataloader = self._dataloader("train", shuffle=True)
+            self.train_dataloader = self._train_dataloader
         if validation is not None:
             self.dataset_configs["validation"] = validation
-            self.val_dataloader = self._dataloader("validation")
+            self.val_dataloader = self._val_dataloader
         if test is not None:
             self.dataset_configs["test"] = test
-            self.test_dataloader = self._dataloader("test")
+            self.test_dataloader = self._test_dataloader
         self.wrap = wrap
 
-    """
-    useless?
     def prepare_data(self):
         for data_cfg in self.dataset_configs.values():
             instantiate_from_config(data_cfg)
-    """
 
     def setup(self, stage=None):
         self.datasets = dict(
@@ -186,12 +182,28 @@ class DataModuleFromConfig(pl.LightningDataModule):
             for k in self.datasets:
                 self.datasets[k] = WrappedDataset(self.datasets[k])
     
-    def _dataloader(self, type, shuffle=False):
-        return Dataloader(
-            self.datasets[type],
+    def _train_dataloader(self):
+        return DataLoader(
+            self.datasets["train"],
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            shuffle=shuffle,
+            shuffle=True,
+            collate_fn=custom_collate
+        )
+    def _val_dataloader(self):
+        return DataLoader(
+            self.datasets["validation"],
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+            collate_fn=custom_collate
+        )
+    def _test_dataloader(self):
+        return DataLoader(
+            self.datasets["test"],
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
             collate_fn=custom_collate
         )
 
@@ -251,7 +263,7 @@ class ImageLogger(Callback):
         self.max_images = max_images
         self.logger_log_images = {
             pl.loggers.WandbLogger: self._wandb,
-            pl.loggers.TestTubeLogger: self._testrube,
+            pl.loggers.TestTubeLogger: self._testtube,
         }
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
         if not increase_log_steps:

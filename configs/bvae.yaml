@@ -3,7 +3,7 @@ model:
   target: bld.models.bvae.BVAEModel
   params:
     embed_dim: 32
-    n_emdeb: 1024
+    n_embed: 1024
     ddconfig:
       double_z: False
       z_channels: 32
