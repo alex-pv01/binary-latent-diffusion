@@ -1,0 +1,52 @@
+model:
+  base_learning_rate: 4.5e-06
+  target: bld.models.transformer.Net2Nettransformer
+  params:
+    cond_stage_key: caption
+    transformer_config:
+      target: bld.modules.transformer.CLIPModel
+      params:
+        fasdf
+        asd
+        fasdff
+        asd
+        fas
+      first_stage_config:
+        base_learning_rate: 4.5e-6
+        target: bld.models.bvae.BVAEModel
+        params:
+          embed_dim: 32
+          n_embed: 1024
+          ddconfig:
+            double_z: False
+            z_channels: 32
+            resolution: 256
+            in_channels: 3
+            out_ch: 3
+            ch: 128
+            ch_mult: [1,1,2,2,4] # num_down = len(ch_mult) - 1
+            num_res_blocks: 2
+            attn_resolutions: [16]
+            dropout: 0.0
+
+          lossconfig:
+            target: bld.modules.losses.perceptual.DummyLoss
+
+
+data: 
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 5
+    num_workers: 8
+    train:
+      target: bld.data.custom.COCOwithCaption
+      params:
+        train_images_path: ./train.txt
+        train_captions_path: ./train.txt
+        size: 256
+    validation: 
+      target: bld.data.custom.COCOwithCaption
+      params:
+        test_images_path: ./train.txt
+        test_captions_path: ./train.txt
+        size: 256

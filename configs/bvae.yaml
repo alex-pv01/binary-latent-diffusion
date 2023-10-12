@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 4.5e-8
+  base_learning_rate: 4.5e-6
   target: bld.models.bvae.BVAEModel
   params:
     embed_dim: 32
