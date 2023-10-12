@@ -37,5 +37,5 @@ data:
     validation: 
       target: bld.data.custom.CustomTest
       params:
-        test_images_list_file: ./test.txt
+        test_images_list_file: ./val.txt
         size: 256
