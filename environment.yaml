@@ -1,4 +1,4 @@
-name: bld
+name: main
 channels:
   - pytorch
   - defaults
