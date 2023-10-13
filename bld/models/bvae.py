@@ -9,7 +9,7 @@ from bld.modules.quantize import BinaryQuantizer
 
 
 class BVAEModel(pl.LightningModule):
-    def __init__(self, ddconfig, lossconfig, n_embed, embed_dim, ckpt_path=None, ignore_keys=[], image_key="image", colorize_nlabels=None, monitor=None, remap=None, sane_index_shape=False):
+    def __init__(self, ddconfig, lossconfig, embed_dim, ckpt_path=None, ignore_keys=[], image_key="image", colorize_nlabels=None, monitor=None, remap=None, sane_index_shape=False):
         super().__init__()
         self.image_key = image_key
         self.encoder = Encoder(**ddconfig)

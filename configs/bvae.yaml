@@ -1,9 +1,8 @@
 model:
-  base_learning_rate: 4.5e-6
+  base_learning_rate: 5e-4
   target: bld.models.bvae.BVAEModel
   params:
     embed_dim: 32
-    n_embed: 1024
     ddconfig:
       double_z: False
       z_channels: 32
@@ -27,7 +26,7 @@ model:
 data: 
   target: main.DataModuleFromConfig
   params:
-    batch_size: 5
+    batch_size: 8
     num_workers: 8
     train:
       target: bld.data.custom.CustomTrain

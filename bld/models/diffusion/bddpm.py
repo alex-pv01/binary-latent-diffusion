@@ -152,3 +152,13 @@ class BDDPM(pl.LightningModule):
         lvlb_weights[0] = lvlb_weights[1]
         self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
         assert not torch.isnan(self.lvlb_weights).all()
+
+
+    def init_from_ckpt(self, ckpt_path, ignore_keys=[], only_model=False):
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        if only_model:
+            ckpt = ckpt["state_dict"]
+        if exists(ignore_keys):
+            for k in ignore_keys:
+                del ckpt[k]
+        self.load_state_dict(ckpt, strict=False)
