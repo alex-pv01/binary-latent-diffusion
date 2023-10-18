@@ -11,7 +11,7 @@ class LPIPS(nn.Module):
     def __init__(self, use_dropout=True):
         super().__init__()
         self.scaling_layer = ScalingLayer()
-        self.chns = [64, 128, 256, 512, 512]
+        self.chns = [64, 128, 256, 512, 512]  # vg16 features
         self.net = vgg16(pretrained=True, requires_grad=False)
         self.lin0 = NetLinLayer(self.chns[0], use_dropout=use_dropout)
         self.lin1 = NetLinLayer(self.chns[1], use_dropout=use_dropout)
@@ -22,12 +22,10 @@ class LPIPS(nn.Module):
         for param in self.parameters():
             param.requires_grad = False
 
-    
     def load_from_pretrained(self, name="vgg_lpips"):
-        ckpt = get_ckpt_path(name, "bld/modules/losses")
+        ckpt = get_ckpt_path(name, "taming/modules/autoencoder/lpips")
         self.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")), strict=False)
         print("loaded pretrained LPIPS loss from {}".format(ckpt))
-
 
     @classmethod
     def from_pretrained(cls, name="vgg_lpips"):
@@ -37,7 +35,6 @@ class LPIPS(nn.Module):
         ckpt = get_ckpt_path(name)
         model.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")), strict=False)
         return model
-    
 
     def forward(self, input, target):
         in0_input, in1_input = (self.scaling_layer(input), self.scaling_layer(target))
@@ -55,7 +52,6 @@ class LPIPS(nn.Module):
         return val
 
 
-# Auxiliary functions
 class ScalingLayer(nn.Module):
     def __init__(self):
         super(ScalingLayer, self).__init__()
@@ -64,7 +60,7 @@ class ScalingLayer(nn.Module):
 
     def forward(self, inp):
         return (inp - self.shift) / self.scale
-    
+
 
 class NetLinLayer(nn.Module):
     """ A single linear layer which does a 1x1 conv """
@@ -113,7 +109,7 @@ class vgg16(torch.nn.Module):
         vgg_outputs = namedtuple("VggOutputs", ['relu1_2', 'relu2_2', 'relu3_3', 'relu4_3', 'relu5_3'])
         out = vgg_outputs(h_relu1_2, h_relu2_2, h_relu3_3, h_relu4_3, h_relu5_3)
         return out
-    
+
 
 def normalize_tensor(x,eps=1e-10):
     norm_factor = torch.sqrt(torch.sum(x**2,dim=1,keepdim=True))

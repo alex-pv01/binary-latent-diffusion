@@ -6,6 +6,10 @@ from bld.modules.losses.lpips import LPIPS
 from bld.modules.losses.discriminator import NLayerDiscriminator, weights_init
 
 
+class DummyLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
 # Main loss for binary autoencoder
 class LPIPSWithDiscriminator(nn.Module):
     def __init__(self, disc_start, pixelloss_weight=1.0, disc_num_layers=3, disc_in_channels=3, disc_factor=1.0, disc_weight=1.0, perceptual_weight=1.0, use_actnorm=False, disc_conditional=False, disc_ndf=64, disc_loss="hinge"):
@@ -50,6 +54,7 @@ class LPIPSWithDiscriminator(nn.Module):
     def forward(self, inputs, reconstructions, optimizer_idx, global_step, last_layer=None, cond=None, split="train"):
         mse_loss = nn.MSELoss()
         rec_loss = mse_loss(inputs.contiguous(), reconstructions.contiguous())
+        #rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())
         if self.perceptual_weight > 0:
             p_loss = self.perceptual_loss(inputs.contiguous(), reconstructions.contiguous())
             rec_loss = rec_loss + self.perceptual_weight * p_loss
