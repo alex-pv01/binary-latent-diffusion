@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from einops import rearrange, repeat
 from torchvision.utils import make_grid
 
+import pdb
+
 
 from bld.utils import count_params, exists, instantiate_from_config
 from bld.modules.ema import LitEma
@@ -35,6 +37,7 @@ class BDDPM(pl.LightningModule):
     def __init__(self, 
                  unet_config,
                  aux=0,
+                 gamma=1.,
                  timesteps=100,
                  beta_schedule="linear",
                  loss_type="l2",
@@ -56,7 +59,7 @@ class BDDPM(pl.LightningModule):
                  v_posterior=0.,  # weight for choosing posterior variance as sigma = (1-v) * beta_tilde + v * beta
                  l_simple_weight=1.,
                  conditioning_key=None,
-                 parameterization="z0",  # all assuming fixed variance schedules
+                 parameterization="zt+z0",  # all assuming fixed variance schedules
                  scheduler_config=None,
                  use_positional_encodings=False,
                  learn_logvar=False,
@@ -108,7 +111,10 @@ class BDDPM(pl.LightningModule):
         if self.learn_logvar:
             self.logvar = nn.Parameter(self.logvar, requires_grad=True)
 
+        # hyperparameter for balancing the sum of the loss terms
         self.aux = aux
+        # hyperparameter for balancing the residual loss
+        self.gamma = gamma
 
 
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
@@ -221,36 +227,6 @@ class BDDPM(pl.LightningModule):
         return torch.bernoulli(self.q_post(x_start, t))
     
 
-    def predict_start_from_noise(self, x_t, t, noise):
-        
-
-
-
-    def p_prob(self, x, t, clip_denoised: bool):
-
-
-
-    
-    def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
-        
-
-
-
-    def get_loss(self, pred, target, mean=True):
-        # define a function that computes kl loss for multivariate bernoulli
-        # use https://math.stackexchange.com/questions/2604566/kl-divergence-between-two-multivariate-bernoulli-distribution
-
-        assert self.aux >= 0
-
-        # Compute L_vlb loss
-        if self.aux > 0:
-            
-        # Compute L_residual loss
-        
-        
-
-
-
     def p_losses(self, x_start, t):
         """
         Compute the loss of the model.
@@ -266,10 +242,66 @@ class BDDPM(pl.LightningModule):
         #elif self.parameterization == "z0":
         #    target =
         if self.parameterization == "zt+z0":
-            target = 
+            # Ensure pred is in [0, 1]
+            p_flip = torch.sigmoid(pred)
+            # Compute zt xor z0
+            xor = torch.logical_xor(x_start, x_t) * 1.0
+            # Compute BCE loss
+            bce_loss = nn.functional.binary_cross_entropy_with_logits(p_flip, xor, reduction="none")
+            loss_dict["bce_loss"] = bce_loss.mean()
+            # Compute L_residual loss
+            p_residual = p_flip * xor + (1 - p_flip) * (1 - xor) # probability for computing expectation of the BCE loss
+            L_residual = bce_loss * (p_residual ** self.gamma)
+            L_residual = L_residual.mean()
+            loss_dict["L_residual"] = L_residual
+            # Compute predicted x_start, it is a samplig of p_0
+            p_0 = (1 - x_t) * p_flip + x_t * (1 - p_flip)
+            p_0 = torch.clamp(p_0, 1e-7, 1 - 1e-7)
+            x_start_pred = torch.bernoulli(p_0)
         else:
             raise NotImplementedError(f"Paramterization {self.parameterization} not yet supported")
 
+        # Compute accuracy
+        acc = (x_start_pred == x_start).float().mean()
+        loss_dict["acc"] = acc
+        
+        # Compute L_vlb loss
+        if self.aux > 0:
+            ftr = (((t-1) == 0) * 1.0).view(-1, 1, 1)
+
+            x_0_logits = torch.cat([x_start_pred.unsqueeze(-1), (1-x_start_pred).unsqueeze(-1)], dim=-1)
+            x_t_logits = torch.cat([x_t.unsqueeze(-1), (1-x_t).unsqueeze(-1)], dim=-1)
+
+            p_EV_qxtmin_x0 = self.scheduler(x_0_logits, t-1)
+
+            q_one_step = self.scheduler.one_step(x_t_logits, t)
+            unnormed_probs = p_EV_qxtmin_x0 * q_one_step
+            unnormed_probs = unnormed_probs / (unnormed_probs.sum(-1, keepdims=True)+1e-6)
+            unnormed_probs = unnormed_probs[...,0]
+            
+            x_tm1_logits = unnormed_probs * (1-ftr) + x_start * ftr
+            x_0_gt = torch.cat([x_start.unsqueeze(-1), (1-x_start).unsqueeze(-1)], dim=-1)
+            p_EV_qxtmin_x0_gt = self.scheduler(x_0_gt, t-1)
+            unnormed_gt = p_EV_qxtmin_x0_gt * q_one_step
+            unnormed_gt = unnormed_gt / (unnormed_gt.sum(-1, keepdims=True)+1e-6)
+            unnormed_gt = unnormed_gt[...,0]
+
+            x_tm1_gt = unnormed_gt
+
+            if torch.isinf(x_tm1_logits).max() or torch.isnan(x_tm1_logits).max():
+                pdb.set_trace()
+            aux_loss = nn.functional.binary_cross_entropy(x_tm1_logits.clamp(min=1e-6, max=(1.0-1e-6)), x_tm1_gt.clamp(min=0.0, max=1.0), reduction='none')
+
+            L_vlb = aux_loss.mean()
+            L_total = self.aux * L_vlb + L_residual
+
+            loss_dict["L_vlb"] = L_vlb
+            loss_dict["L_total"] = L_total
+
+            return L_total, loss_dict
+        
+        else:
+            return L_residual, loss_dict
 
 
 

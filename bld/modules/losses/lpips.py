@@ -6,8 +6,8 @@ from collections import namedtuple
 from bld.utils import get_ckpt_path
 
 
-# Lerned perceptual metric
 class LPIPS(nn.Module):
+    # Learned perceptual metric
     def __init__(self, use_dropout=True):
         super().__init__()
         self.scaling_layer = ScalingLayer()
