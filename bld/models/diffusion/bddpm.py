@@ -34,6 +34,7 @@ def uniform_on_device(r1, r2, shape, device):
 class BDDPM(pl.LightningModule):
     def __init__(self, 
                  unet_config,
+                 aux=0,
                  timesteps=100,
                  beta_schedule="linear",
                  loss_type="l2",
@@ -63,7 +64,8 @@ class BDDPM(pl.LightningModule):
                  device=None,
                  ):
         super().__init__()
-        assert parameterization in ['prob', 'z0', 'zt+z0']
+        #assert parameterization in ['prob', 'z0', 'zt+z0']
+        assert parameterization in ['zt+z0']
         print(f"{self.__class__.__name__}: Running in {self.parameterization}-prediction mode")
         self.cond_stage_model = None
         self.clip_denoised = clip_denoised
@@ -106,6 +108,8 @@ class BDDPM(pl.LightningModule):
         if self.learn_logvar:
             self.logvar = nn.Parameter(self.logvar, requires_grad=True)
 
+        self.aux = aux
+
 
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
                           linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
@@ -119,7 +123,7 @@ class BDDPM(pl.LightningModule):
 
         bs = [0.5 * betas[0]]
         for i in range(1, len(betas)):
-            bs.append((1 - betas[i]) * bs[i - 1] + 0.5 * betas[i])
+            bs.append(alphas[i] * bs[i - 1] + 0.5 * betas[i])
         bs = np.array(bs)
 
         timesteps, = betas.shape
@@ -136,13 +140,13 @@ class BDDPM(pl.LightningModule):
         self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
         self.register_buffer('bs', to_torch(bs))
 
-        if self.parameterization == "prob":
+        #if self.parameterization == "prob":
             # create a torch tensor of ones with the same shape as self.betas
-            lvlb_weights = torch.ones_like(self.betas + 1, dtype=torch.float32)
-        elif self.parameterization == "x0":
-            lvlb_weights = 0.5 * np.sqrt(torch.Tensor(alphas_cumprod)) / (2. * 1 - torch.Tensor(alphas_cumprod))
-        else:
-            raise NotImplementedError("mu not supported")
+        lvlb_weights = torch.ones_like(self.betas + 1, dtype=torch.float32)
+        #elif self.parameterization == "x0":
+        #    lvlb_weights = 0.5 * np.sqrt(torch.Tensor(alphas_cumprod)) / (2. * 1 - torch.Tensor(alphas_cumprod))
+        #else:
+        #    raise NotImplementedError("mu not supported")
         # TODO how to choose this term
         lvlb_weights[0] = -1.
         self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
@@ -204,7 +208,7 @@ class BDDPM(pl.LightningModule):
         kt = torch.full_like(x_start, self.alphas_cumprod[t])
         # torch tensor of shape as x_start but with all elements being self.bs[t]
         bt = torch.full_like(x_start, self.bs[t])
-        return kt + x_start * bt
+        return kt * x_start + bt
     
 
     def q_sample(self, x_start, t):
@@ -235,6 +239,14 @@ class BDDPM(pl.LightningModule):
     def get_loss(self, pred, target, mean=True):
         # define a function that computes kl loss for multivariate bernoulli
         # use https://math.stackexchange.com/questions/2604566/kl-divergence-between-two-multivariate-bernoulli-distribution
+
+        assert self.aux >= 0
+
+        # Compute L_vlb loss
+        if self.aux > 0:
+            
+        # Compute L_residual loss
+        
         
 
 
@@ -249,8 +261,14 @@ class BDDPM(pl.LightningModule):
         pred = self.model(x_t, t)
         # Compute the loss
         loss_dict = dict()
-        if self.parameterization == 'prob':
-            loss = self.get_loss(pred, target=, mean=True)
+        #if self.parameterization == "prob":
+        #    target = 
+        #elif self.parameterization == "z0":
+        #    target =
+        if self.parameterization == "zt+z0":
+            target = 
+        else:
+            raise NotImplementedError(f"Paramterization {self.parameterization} not yet supported")
 
 
 
