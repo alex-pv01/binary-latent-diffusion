@@ -1,20 +1,23 @@
+from typing import Callable
 import torch 
 import torch.nn as nn
 import numpy as np
 import pytorch_lightning as pl
+from torch.nn.modules.module import Module
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from functools import partial
 from contextlib import contextmanager
 from einops import rearrange, repeat
 from torchvision.utils import make_grid
+from pytorch_lightning.utilities.distributed import rank_zero_only
 
 import pdb
-
 
 from bld.utils import count_params, exists, instantiate_from_config
 from bld.modules.ema import LitEma
 from bld.modules.diffusionmodules.utils import make_beta_schedule
+from bld.modules.distributions.distributions import BernoulliDistribution
 
 __conditioning_keys__ = {"concat": "c_concat",
                          "crossattn": "c_crossattn",
@@ -158,7 +161,6 @@ class BDDPM(pl.LightningModule):
         self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
         assert not torch.isnan(self.lvlb_weights).all()
 
-
     @contextmanager
     def ema_scope(self, context=None):
         if self.use_ema:
@@ -225,16 +227,28 @@ class BDDPM(pl.LightningModule):
         :return: A sample tensor of x_start's shape.
         """
         return torch.bernoulli(self.q_post(x_start, t))
+
+
+    def apply_model(self, x_start, t, cond=None):
+        """
+        Apply the model to a noiseless input x_start.
+        :param x_start: the [N x C x ...] tensor of noiseless inputs.
+        :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
+        :param cond: the [N x C x ...] tensor of conditioning inputs.
+        :return: A tensor of x_start's shape.
+        """
+        #TODO add conditioning
+        return self.model(x_start, t)
     
 
-    def p_losses(self, x_start, t):
+    def p_losses(self, x_start, t, cond=None):
         """
         Compute the loss of the model.
         """
         # Sample x_t
         x_t = self.q_sample(x_start, t)
         # Predict using the model
-        pred = self.model(x_t, t)
+        pred = self.apply_model(x_t, t, cond)
         # Compute the loss
         loss_dict = dict()
         #if self.parameterization == "prob":
@@ -304,11 +318,9 @@ class BDDPM(pl.LightningModule):
             return L_residual, loss_dict
 
 
-
     def forward(self, x, *args, **kwargs):
         t = self.sample_time(x.shape[0], device=self.device)
         return self.p_losses(x, t, *args, **kwargs)
-
 
 
     def get_input(self, batch, k):
@@ -350,9 +362,11 @@ class BDDPM(pl.LightningModule):
         self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
         self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
+
     def on_train_batch_end(self, *args, **kwargs):
         if self.use_ema:
             self.model_ema(self.model)
+
 
     def _get_rows_from_list(self, samples):
         n_imgs_per_row = len(samples)
@@ -360,6 +374,7 @@ class BDDPM(pl.LightningModule):
         denoise_grid = rearrange(denoise_grid, 'b n c h w -> (b n) c h w')
         denoise_grid = make_grid(denoise_grid, nrow=n_imgs_per_row)
         return denoise_grid
+
 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=2, sample=True, return_keys=None, **kwargs):
@@ -399,6 +414,7 @@ class BDDPM(pl.LightningModule):
                 return {key: log[key] for key in return_keys}
         return log
 
+
     def configure_optimizers(self):
         lr = self.learning_rate
         params = list(self.model.parameters())
@@ -413,12 +429,11 @@ class BinaryLatentDiffusion(BDDPM):
     """
     Main class
     """
-
     def __init__(self,
                  first_stage_config,
                  cond_stage_config,
                  num_timesteps_cond=None,
-                 cond_stage_key="image",
+                 cond_stage_key="caption",
                  cond_stage_trainable=False,
                  concat_mode=True,
                  cond_stage_forward=None,
@@ -426,6 +441,252 @@ class BinaryLatentDiffusion(BDDPM):
                  scale_factor=1.0,
                  scale_by_std=False,
                  *args, **kwargs):
+        self.num_timesteps_cond = num_timesteps_cond
+        self.scale_by_std = scale_by_std
+        assert self.num_timesteps_cond <= kwargs["timesteps"]
+        # for backwards compatibility after implementation of DiffusionWrapper
+        if conditioning_key is None:
+            conditioning_key = 'concat' if concat_mode else 'crossattn'
+        if cond_stage_config == '__is_unconditional__':
+            conditioning_key = None
+        ckpt_path = kwargs.pop("ckpt_path", None)
+        ignore_keys = kwargs.pop("ignore_keys", [])
+        super().__init__(conditioning_key=conditioning_key, *args, **kwargs)
+        self.concat_mode = concat_mode
+        self.cond_stage_trainable = cond_stage_trainable
+        self.cond_stage_key = cond_stage_key
+        try:
+            self.num_downs = len(first_stage_config.params.ddconfig.ch_mult) - 1
+        except:
+            self.num_downs = 0
+        if not scale_by_std:
+            self.scale_factor = scale_factor
+        else:
+            self.register_buffer("scale_factor", torch.tensor(scale_factor))
+        self.instantiate_first_stage(first_stage_config)
+        self.instantiate_cond_stage(cond_stage_config)
+        self.cond_stage_forward = cond_stage_forward
+        self.clip_denoised = False
+        self.bbox_tokenizer = None
+
+        self.restarted_from_ckpt = False
+        if ckpt_path is not None:
+            self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
+            self.restarted_from_ckpt = True
+
+
+    def make_cond_schedule(self, ):
+        self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
+        ids = torch.round(torch.linspace(0, self.num_timesteps - 1, self.num_timesteps_cond)).long()
+        self.cond_ids[:self.num_timesteps_cond] = ids
+
+
+    def register_schedule(self, 
+                          given_betas=None, 
+                          beta_schedule="linear", 
+                          timesteps=1000, 
+                          linear_start=0.0001, 
+                          linear_end=0.02, 
+                          cosine_s=0.008):
+        super().register_schedule(given_betas, beta_schedule, timesteps, linear_start, linear_end, cosine_s)
+        self.shorten_cond_schedule = self.num_timesteps_cond > 1
+        if self.shorten_cond_schedule:
+            self.make_cond_schedule()
+
+
+    def instantiate_first_stage(self, config):
+        model = instantiate_from_config(config)
+        self.first_stage_model = model.eval()
+        self.first_stage_model.train = disabled_train
+        for param in self.first_stage_model.parameters():
+            param.requires_grad = False
+
+
+    def instantiate_cond_stage(self, config):
+        if not self.cond_stage_trainable:
+            if config == "__is_first_stage__":
+                print("Using first stage as cond stage")
+                self.cond_stage_model = self.first_stage_model
+            elif config == "__is_unconditional__":
+                print("Using unconditional model")
+                self.cond_stage_model = None
+            else:
+                model = instantiate_from_config(config)
+                self.cond_stage_model = model.eval()
+                self.cond_stage_model.train = disabled_train
+                for param in self.cond_stage_model.parameters():
+                    param.requires_grad = False
+        else:
+            assert config != "__is_unconditional__"
+            assert config != "__is_first_stage__"
+            model = instantiate_from_config(config)
+            self.cond_stage_model = model
+
+
+    @rank_zero_only
+    @torch.no_grad()
+    def on_train_batch_start(self, batch, batch_idx, dataloader_idx):
+        # Only for very first batch
+        if self.scale_by_std and self.current_epoch == 0 and self.global_step == 0 and batch_idx == 0 and not self.restarted_from_ckpt:
+            assert self.scale_factor == 1.0, "Rather not use custom rescaling and std-rescaling simultaneously"
+            # Set rescale weigth to 1./std of encodings
+            print("Rescaling by std of encodings")
+            x = super().get_input(batch, self.first_stage_key)
+            x = x.to(self.device)
+            encoder_posterior = self.encode_first_stage(x)
+            z = self.get_first_stage_encoding(encoder_posterior).detach()
+            del self.scale_factor
+            self.register_buffer("scale_factor", 1./z.flatten().std())
+            print(f"setting self.scale_factor to {self.scale_factor}")
+
+
+    def get_input(self, batch, k,
+                  return_first_stage_outputs = False,
+                  force_c_encode = False, 
+                  cond_key = None, 
+                  return_original_cond = False, 
+                  bs = None):
+        x = super().get_input(batch, k)
+        if bs is not None:
+            x = x[:bs]
+        encoder_posterior = self.encode_first_stage(x)
+        z = self.get_first_stage_encoding(encoder_posterior).detach
+
+        #TODO: add conditioning
+        if self.model.conditioning_key is not None:
+            raise NotImplementedError("Conditioning not yet supported")
+            pass
+        else:
+            c = None
+            xc = None
+
+        out = [z, c]
+
+        if return_first_stage_outputs:
+            xrec = self.decode_first_stage(z)
+            out.extend([x, xrec])
+        if return_original_cond:
+            out.append(xc)
+        
+        return out
+
+
+    def get_first_stage_encoding(self, encoder_posterior):
+        if isinstance(encoder_posterior, BernoulliDistribution):
+            z = encoder_posterior.sample()
+        elif isinstance(encoder_posterior, torch.Tensor):
+            z = encoder_posterior
+        else:
+            raise NotImplementedError("Only Bernoulli and Tensor encodings supported")
+        return self.scale_factor * z
+
+
+    def encode_first_stage(self, x):
+        return self.first_stage_model.encode(x)
+    
+
+    def decode_first_stage(self, z):
+        return self.first_stage_model.decode(z)
+    
+
+    def get_learned_conditioning(self, c):
+        #TODO: add conditioning
+        raise NotImplementedError("Conditioning not yet supported")
+        return None
+            
+
+    def shared_step(self, batch):
+        """
+        Compute the loss of the model.
+        """
+        x, c = self.get_input(batch, self.first_stage_key)
+        loss = self(x, c)
+        return loss
+
+
+    def forward(self, x, c, *args, **kwargs):
+        t = self.sample_time(x.shape[0], device=self.device)
+        if self.model.conditioning_key is not None:
+            assert c is not None
+            if self.cond_stage_trainable:
+                c = self.get_learned_conditioning(c)
+            if self.shorten_cond_schedule:
+                tc = self.cond_ids[t].to(self.device)
+                c = self.q_sample(x_start=c, t=tc)
+        return self.p_losses(x, t, c, *args, **kwargs)
+
+
+    def sample(self, cond,
+               batch_size=16,
+               return_intermediates=False,
+               x_T=None,
+               verbose=True,
+               timesteps=None,
+               quantized_denoised=True,
+               mask=None,
+               x0=None,
+               shape=None, 
+               **kwargs):
+        """
+        Sample from the model.
+        """
+        if shape is None:
+            shape = (batch_size, self.channels, self.image_size, self.image_size)
+        if cond is not None:
+            #TODO: add conditioning
+            raise NotImplementedError("Conditioning not yet supported")
+            pass
+        return self.p_sample_loop(cond, shape, x_T, timesteps, quantized_denoised, mask, x0, return_intermediates, verbose, **kwargs)
+
+    
+    def p_sample_loop(self, cond, shape, x_T, timesteps, quantized_denoised, mask, x0, return_intermediates, verbose,
+                      img_callback=None,
+                      start_T=None,
+                      log_every_t=None,
+                      **kwargs):
+        """
+        Loop to sample from the model.
+        """
+        if not log_every_t:
+            log_every_t = self.log_every_t
+        device = self.betas.device
+        b = shape[0]
+        if x_T is None:
+            # Tensor of shape as shape of 0.5s
+            x_T = torch.full(shape, 0.5, device=device)
+        else:
+            img = x_T
+        
+        intermediates = [img]
+
+        if timesteps is None:
+            timesteps = self.num_timesteps
+
+        if start_T is not None:
+            timesteps = min(timesteps, start_T)
+        
+        iterator = tqdm(reversed(range(0, timesteps)), desc='Sampling t', total=timesteps) if verbose else reversed(range(0, timesteps))
+
+        if mask is not None:
+            assert x0 is not None
+            assert x0.shape[2:3] == mask.shape[2:3] # Spatial dimensions must match
+
+        for i in iterator:
+            ts = torch.full((b,), i, device=device).long()
+            if self.shorten_cond_schedule:
+                assert self.model.conditioning_key != 'hybrid'
+                tc = self.cond_ids[ts].to(cond.device)
+                cond = self.q_sample(x_start=cond, t=tc)
+
+            img = self.p_sample(img, ts, cond)
+        
+        
+
+    
+
+
+        
+
 
 
 

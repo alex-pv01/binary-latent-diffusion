@@ -65,8 +65,9 @@ model:
         lossconfig:
           target: torch.nn.Identity
 
-    cond_stage_config:
-      target: bld.modules.encoders.modules.BERTEmbedder
-      params:
-        n_embed: 1280
-        n_layer: 32
+    #TODO: add conditioning stage
+    #cond_stage_config:
+    #  target: bld.modules.encoders.modules.BERTEmbedder
+    #  params:
+    #    n_embed: 1280
+    #    n_layer: 32
