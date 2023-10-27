@@ -71,6 +71,7 @@ class BDDPM(pl.LightningModule):
         super().__init__()
         #assert parameterization in ['prob', 'z0', 'zt+z0']
         assert parameterization in ['zt+z0']
+        self.parameterization = parameterization
         print(f"{self.__class__.__name__}: Running in {self.parameterization}-prediction mode")
         self.cond_stage_model = None
         self.clip_denoised = clip_denoised
@@ -97,7 +98,9 @@ class BDDPM(pl.LightningModule):
         self.original_elbo_weight = original_elbo_weight
         self.l_simple_weight = l_simple_weight
 
-        self.device = device
+        print("PRINTING DEVICE: ", device)
+
+        #self.device = device
 
         if monitor is not None:
             self.monitor = monitor
