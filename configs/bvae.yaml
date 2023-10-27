@@ -2,11 +2,11 @@ model:
   base_learning_rate: 4.5e-6
   target: bld.models.bvae.BVAEModel
   params:
-    embed_dim: 32
+    embed_dim: 64
     n_embed: 1024
     ddconfig:
       double_z: False
-      z_channels: 32
+      z_channels: 64
       resolution: 256
       in_channels: 3
       out_ch: 3

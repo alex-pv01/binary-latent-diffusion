@@ -1,9 +1,7 @@
-from typing import Callable
 import torch 
 import torch.nn as nn
 import numpy as np
 import pytorch_lightning as pl
-from torch.nn.modules.module import Module
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from functools import partial
@@ -14,7 +12,8 @@ from pytorch_lightning.utilities.distributed import rank_zero_only
 
 import pdb
 
-from bld.utils import count_params, exists, instantiate_from_config
+from main import instantiate_from_config
+from bld.utils import count_params, exists, log_txt_as_img, isimage, ismap
 from bld.modules.ema import LitEma
 from bld.modules.diffusionmodules.utils import make_beta_schedule
 from bld.modules.distributions.distributions import BernoulliDistribution
@@ -48,7 +47,7 @@ class BDDPM(pl.LightningModule):
                  ignore_keys=[],
                  load_only_unet=False,
                  monitor="val/loss",
-                 use_ema=True,
+                 use_ema=False,
                  first_stage_key="image",
                  image_size=256,
                  channels=3,
@@ -83,9 +82,10 @@ class BDDPM(pl.LightningModule):
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
-        count_params(self.model, verbose=True)
+        self.total_params = count_params(self.model, verbose=True)
         self.use_ema = use_ema
         if self.use_ema:
+            raise NotImplementedError("EMA not yet supported")
             self.model_ema = LitEma(self.model)
             print(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
 
@@ -229,6 +229,13 @@ class BDDPM(pl.LightningModule):
         return torch.bernoulli(self.q_post(x_start, t))
 
 
+    def one_step(self, x, t):
+        dim = x.ndim - 1
+        k = self.betas[t].view(-1, *([1]*dim))
+        x = x * k + 0.5 * (1-k)
+        return x
+
+
     def apply_model(self, x_start, t, cond=None):
         """
         Apply the model to a noiseless input x_start.
@@ -286,16 +293,16 @@ class BDDPM(pl.LightningModule):
             x_0_logits = torch.cat([x_start_pred.unsqueeze(-1), (1-x_start_pred).unsqueeze(-1)], dim=-1)
             x_t_logits = torch.cat([x_t.unsqueeze(-1), (1-x_t).unsqueeze(-1)], dim=-1)
 
-            p_EV_qxtmin_x0 = self.scheduler(x_0_logits, t-1)
+            p_EV_qxtmin_x0 = self.q_post(x_0_logits, t-1)
 
-            q_one_step = self.scheduler.one_step(x_t_logits, t)
+            q_one_step = self.one_step(x_t_logits, t)
             unnormed_probs = p_EV_qxtmin_x0 * q_one_step
             unnormed_probs = unnormed_probs / (unnormed_probs.sum(-1, keepdims=True)+1e-6)
             unnormed_probs = unnormed_probs[...,0]
             
             x_tm1_logits = unnormed_probs * (1-ftr) + x_start * ftr
             x_0_gt = torch.cat([x_start.unsqueeze(-1), (1-x_start).unsqueeze(-1)], dim=-1)
-            p_EV_qxtmin_x0_gt = self.scheduler(x_0_gt, t-1)
+            p_EV_qxtmin_x0_gt = self.q_post(x_0_gt, t-1)
             unnormed_gt = p_EV_qxtmin_x0_gt * q_one_step
             unnormed_gt = unnormed_gt / (unnormed_gt.sum(-1, keepdims=True)+1e-6)
             unnormed_gt = unnormed_gt[...,0]
@@ -403,7 +410,6 @@ class BDDPM(pl.LightningModule):
             # get denoise row
             with self.ema_scope("Plotting"):
                 samples, denoise_row = self.sample(batch_size=N, return_intermediates=True)
-
             log["samples"] = samples
             log["denoise_row"] = self._get_rows_from_list(denoise_row)
 
@@ -457,8 +463,11 @@ class BinaryLatentDiffusion(BDDPM):
         self.cond_stage_key = cond_stage_key
         try:
             self.num_downs = len(first_stage_config.params.ddconfig.ch_mult) - 1
+            latent_res = first_stage_config.params.ddconfig.resolution / self.num_downs
+            self.latent_shape = tuple(first_stage_config.params.ddconfig.z_channels, latent_res, latent_res)
         except:
             self.num_downs = 0
+            self.latent_shape = None
         if not scale_by_std:
             self.scale_factor = scale_factor
         else:
@@ -467,7 +476,6 @@ class BinaryLatentDiffusion(BDDPM):
         self.instantiate_cond_stage(cond_stage_config)
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
-        self.bbox_tokenizer = None
 
         self.restarted_from_ckpt = False
         if ckpt_path is not None:
@@ -550,7 +558,7 @@ class BinaryLatentDiffusion(BDDPM):
         if bs is not None:
             x = x[:bs]
         encoder_posterior = self.encode_first_stage(x)
-        z = self.get_first_stage_encoding(encoder_posterior).detach
+        z = self.get_first_stage_encoding(encoder_posterior).detach()
 
         #TODO: add conditioning
         if self.model.conditioning_key is not None:
@@ -615,77 +623,279 @@ class BinaryLatentDiffusion(BDDPM):
                 c = self.q_sample(x_start=c, t=tc)
         return self.p_losses(x, t, c, *args, **kwargs)
 
-
-    def sample(self, cond,
+    @torch.no_grad()
+    def sample(self,
+               cond=None,
                batch_size=16,
                return_intermediates=False,
-               x_T=None,
+               z_T=None,
                verbose=True,
-               timesteps=None,
-               quantized_denoised=True,
-               mask=None,
-               x0=None,
+               num_sample_steps=None,
                shape=None, 
+               temp=1.0,
                **kwargs):
         """
         Sample from the model.
         """
         if shape is None:
-            shape = (batch_size, self.channels, self.image_size, self.image_size)
+            if self.latent_shape is not None:
+                # add batch_size to the tuple self.latent_shape
+                shape = (batch_size, *self.latent_shape)
+            else:
+                shape = (batch_size, self.channels, self.image_size, self.image_size)
+
         if cond is not None:
             #TODO: add conditioning
             raise NotImplementedError("Conditioning not yet supported")
             pass
-        return self.p_sample_loop(cond, shape, x_T, timesteps, quantized_denoised, mask, x0, return_intermediates, verbose, **kwargs)
-
-    
-    def p_sample_loop(self, cond, shape, x_T, timesteps, quantized_denoised, mask, x0, return_intermediates, verbose,
-                      img_callback=None,
-                      start_T=None,
-                      log_every_t=None,
-                      **kwargs):
-        """
-        Loop to sample from the model.
-        """
+        
         if not log_every_t:
             log_every_t = self.log_every_t
         device = self.betas.device
-        b = shape[0]
-        if x_T is None:
+
+        if z_T is None:
             # Tensor of shape as shape of 0.5s
-            x_T = torch.full(shape, 0.5, device=device)
+            p_T = torch.full(shape, 0.5, device=device)
+            z_T = torch.bernoulli(p_T)
         else:
-            img = x_T
-        
+            z_T = torch.bernoulli(z_T).to(device)
+
+        img = self.decode_first_stage(z_T)
+
         intermediates = [img]
 
-        if timesteps is None:
-            timesteps = self.num_timesteps
+        if num_sample_steps is None:
+            num_sample_steps = self.num_timesteps
 
-        if start_T is not None:
-            timesteps = min(timesteps, start_T)
-        
-        iterator = tqdm(reversed(range(0, timesteps)), desc='Sampling t', total=timesteps) if verbose else reversed(range(0, timesteps))
+        sampling_steps = np.array(range(1, self.num_timesteps+1))
 
-        if mask is not None:
-            assert x0 is not None
-            assert x0.shape[2:3] == mask.shape[2:3] # Spatial dimensions must match
+        if num_sample_steps != self.num_timesteps:
+            idx = np.linspace(0.0, 1.0, num_sample_steps)
+            idx = np.array(idx * (self.num_timesteps-1), int)
+            sampling_steps = sampling_steps[idx]
 
+        iterator = tqdm(reversed(range(num_sample_steps)), desc='Sampling t', total=num_sample_steps) if verbose else reversed(range(num_sample_steps))
+
+        z_t = z_T
         for i in iterator:
-            ts = torch.full((b,), i, device=device).long()
-            if self.shorten_cond_schedule:
-                assert self.model.conditioning_key != 'hybrid'
-                tc = self.cond_ids[ts].to(cond.device)
-                cond = self.q_sample(x_start=cond, t=tc)
+            ts = torch.full((batch_size,), sampling_steps[i], device=device, dtype=torch.long)
 
-            img = self.p_sample(img, ts, cond)
-        
-        
+            #if self.shorten_cond_schedule:
+            #    assert self.model.conditioning_key != 'hybrid'
+            #    tc = self.cond_ids[ts].to(cond.device)
+            #    cond = self.q_sample(x_start=cond, t=tc)
 
+            pred = self.apply_model(z_t, ts, cond)
+            p_flip = torch.sigmoid(pred)
+            # Control with temperature
+            p_flip = p_flip / temp
+            # Compute p_0 given p_flip and z_t
+            p_0 = (1 - z_t) * p_flip + z_t * (1 - p_flip)
+            p_0 = torch.clamp(p_0, 1e-7, 1 - 1e-7)
+            z_0 = torch.bernoulli(p_0)
+
+            # Compute z_t-1
+            if not sampling_steps[i][0].item() == 1:
+                t_p = torch.full((batch_size,), sampling_steps[i+1], device=device, dtype=torch.long)
+                z_0_logits = torch.cat([z_0.unsqueeze(-1), (1-z_0).unsqueeze(-1)], dim=-1)
+                z_t_logits = torch.cat([z_t.unsqueeze(-1), (1-z_t).unsqueeze(-1)], dim=-1)
+
+                p_EV_qztmin_z0 = self.q_post(z_0_logits, t_p)
+                q_one_step = z_t_logits
+
+                for mns in range(sampling_steps[i] - sampling_steps[i+1]):
+                    q_one_step = self.one_step(q_one_step, sampling_steps[i] - mns)
+
+                unnormed_probs = p_EV_qztmin_z0 * q_one_step
+                unnormed_probs = unnormed_probs / unnormed_probs.sum(-1, keepdims=True)
+                unnormed_probs = unnormed_probs[...,0]
+                
+                z_tm1_logits = unnormed_probs
+                z_tm1 = torch.bernoulli(z_tm1_logits)
+            else: 
+                z_tm1 = ()
+            
+            z_t = z_tm1
+            img = self.decode_first_stage(z_t)
+
+            if i % log_every_t == 0 or i == num_sample_steps - 1:
+                intermediates.append(img)
+                
+        if return_intermediates:
+            return img, intermediates
+        else:
+            return img
+    
+    @torch.no_grad()
+    def sample_log(self,cond,batch_size,ddim=False, ddim_steps=None,**kwargs):
+
+        if ddim:
+            #TODO: implement ddim
+            #ddim_sampler = DDIMSampler(self)
+            #shape = (self.channels, self.image_size, self.image_size)
+            #samples, intermediates =ddim_sampler.sample(ddim_steps,batch_size,
+            #                                            shape,cond,verbose=False,**kwargs)
+            raise NotImplementedError("DDIM not yet supported")
+            pass
+        else:
+            samples, intermediates = self.sample(cond=cond, batch_size=batch_size,
+                                                 return_intermediates=True,**kwargs)
+
+        return samples, intermediates
+
+    @torch.no_grad()
+    def log_images(self, batch, N=8,
+                   n_row=4, 
+                   sample=True, 
+                   ddim_steps=None, 
+                   ddim_eta=1., 
+                   return_keys=None,
+                   latent_images=False, 
+                   inpaint=False, 
+                   plot_denoise_rows=False, 
+                   plot_progressive_rows=False,
+                   plot_diffusion_rows=True, 
+                   **kwargs):
+        """
+        
+        """
+        use_ddim = ddim_steps is not None
+
+        log = dict()
+
+        z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
+                                           return_first_stage_outputs=True,
+                                           force_c_encode=True,
+                                           return_original_cond=True,
+                                           bs=N)
+
+        N = min(x.shape[0], N)
+        n_row = min(x.shape[0], n_row)
+        log["inputs"] = x
+        log["reconstruction"] = xrec
+
+        if self.model.conditioning_key is not None:
+            if hasattr(self.cond_stage_model, "decode"):
+                xc = self.cond_stage_model.decode(c)
+                log["conditioning"] = xc
+            elif self.cond_stage_key in ["caption"]:
+                xc = log_txt_as_img((x.shape[2], x.shape[3]), batch["caption"])
+                log["conditioning"] = xc
+            elif self.cond_stage_key == 'class_label':
+                xc = log_txt_as_img((x.shape[2], x.shape[3]), batch["human_label"])
+                log['conditioning'] = xc
+            elif isimage(xc):
+                log["conditioning"] = xc
+            if ismap(xc):
+                log["original_conditioning"] = self.to_rgb(xc)
+
+        if plot_diffusion_rows:
+            # get diffusion row
+            diffusion_row = list()
+            z_start = z[:n_row]
+            for t in range(self.num_timesteps):
+                if t % self.log_every_t == 0 or t == self.num_timesteps - 1:
+                    t = repeat(torch.tensor([t]), '1 -> b', b=n_row)
+                    t = t.to(self.device).long()
+                    noise = torch.randn_like(z_start)
+                    z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
+                    diffusion_row.append(self.decode_first_stage(z_noisy))
+
+            diffusion_row = torch.stack(diffusion_row)  # n_log_step, n_row, C, H, W
+            diffusion_grid = rearrange(diffusion_row, 'n b c h w -> b n c h w')
+            diffusion_grid = rearrange(diffusion_grid, 'b n c h w -> (b n) c h w')
+            diffusion_grid = make_grid(diffusion_grid, nrow=diffusion_row.shape[0])
+            log["diffusion_row"] = diffusion_grid
+
+        if sample:
+            # get denoise row
+            with self.ema_scope("Plotting"):
+                samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
+                                                         ddim_steps=ddim_steps,eta=ddim_eta)
+                # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
+            x_samples = self.decode_first_stage(samples)
+            log["samples"] = x_samples
+
+            if plot_denoise_rows:
+                denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
+                log["denoise_row"] = denoise_grid
+
+            if latent_images:
+                # plot the latent images
+                raise NotImplementedError("Latent images not yet supported")
+
+            if inpaint:
+                raise NotImplementedError("Inpainting not yet supported")
+                # make a simple center square
+                b, h, w = z.shape[0], z.shape[2], z.shape[3]
+                mask = torch.ones(N, h, w).to(self.device)
+                # zeros will be filled in
+                mask[:, h // 4:3 * h // 4, w // 4:3 * w // 4] = 0.
+                mask = mask[:, None, ...]
+                with self.ema_scope("Plotting Inpaint"):
+
+                    samples, _ = self.sample_log(cond=c,batch_size=N,ddim=use_ddim, eta=ddim_eta,
+                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask)
+                x_samples = self.decode_first_stage(samples.to(self.device))
+                log["samples_inpainting"] = x_samples
+                log["mask"] = mask
+
+                # outpaint
+                with self.ema_scope("Plotting Outpaint"):
+                    samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,eta=ddim_eta,
+                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask)
+                x_samples = self.decode_first_stage(samples.to(self.device))
+                log["samples_outpainting"] = x_samples
+
+        if plot_progressive_rows:
+            raise NotImplementedError("Progressive rows not yet supported")
+            with self.ema_scope("Plotting Progressives"):
+                img, progressives = self.progressive_denoising(c,
+                                                               shape=(self.channels, self.image_size, self.image_size),
+                                                               batch_size=N)
+            prog_row = self._get_denoise_row_from_list(progressives, desc="Progressive Generation")
+            log["progressive_row"] = prog_row
+
+        if return_keys:
+            if np.intersect1d(list(log.keys()), return_keys).shape[0] == 0:
+                return log
+            else:
+                return {key: log[key] for key in return_keys}
+        return log
+
+    @torch.no_grad()
+    def to_rgb(self, x):
+        x = x.float()
+        if not hasattr(self, "colorize"):
+            self.colorize = torch.randn(3, x.shape[1], 1, 1).to(x)
+        x = nn.functional.conv2d(x, weight=self.colorize)
+        x = 2. * (x - x.min()) / (x.max() - x.min()) - 1.
+        return x
     
 
+    def configure_optimizers(self):
+        lr = self.learning_rate
+        params = list(self.model.parameters())
+        if self.cond_stage_trainable:
+            print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
+            params = params + list(self.cond_stage_model.parameters())
+        if self.learn_logvar:
+            print('Diffusion model optimizing logvar')
+            params.append(self.logvar)
+        opt = torch.optim.AdamW(params, lr=lr)
+        if self.use_scheduler:
+            assert 'target' in self.scheduler_config
+            scheduler = instantiate_from_config(self.scheduler_config)
 
-        
+            print("Setting up LambdaLR scheduler...")
+            scheduler = [
+                {
+                    'scheduler': LambdaLR(opt, lr_lambda=scheduler.schedule),
+                    'interval': 'step',
+                    'frequency': 1
+                }]
+            return [opt], scheduler
+        return opt
 
 
 
@@ -701,23 +911,23 @@ class DiffusionWrapper(pl.LightningModule):
     def forward(self, x, t, c_concat: list = None, c_crossattn: list = None):
         if self.conditioning_key is None:
             return self.diffusion_model(x, t)
-        elif self.conditioning_key == "concat":
-            assert exists(c_concat)
-            xc = torch.cat([x] + c_concat, dim=1)
-            return self.diffusion_model(xc, t)
-        elif self.conditioning_key == "crossattn":
-            assert exists(c_crossattn)
-            cc = torch.cat(c_crossattn, 1)
-            return self.diffusion_model(x, t, context=cc)
-        elif self.conditioning_key == "adm":
-            assert exists(c_crossattn)
-            cc = c_crossattn[0]
-            return self.diffusion_model(x, t, y=cc)
-        elif self.conditioning_key == "hybrid":
-            assert exists(c_concat) and exists(c_crossattn)
-            xc = torch.cat([x] + c_concat, dim=1)
-            cc = torch.cat(c_crossattn, 1)
-            return self.diffusion_model(xc, t, context=cc)
+        #elif self.conditioning_key == "concat":
+        #    assert exists(c_concat)
+        #    xc = torch.cat([x] + c_concat, dim=1)
+        #    return self.diffusion_model(xc, t)
+        #elif self.conditioning_key == "crossattn":
+        #    assert exists(c_crossattn)
+        #    cc = torch.cat(c_crossattn, 1)
+        #    return self.diffusion_model(x, t, context=cc)
+        #elif self.conditioning_key == "adm":
+        #    assert exists(c_crossattn)
+        #    cc = c_crossattn[0]
+        #    return self.diffusion_model(x, t, y=cc)
+        #elif self.conditioning_key == "hybrid":
+        #    assert exists(c_concat) and exists(c_crossattn)
+        #    xc = torch.cat([x] + c_concat, dim=1)
+        #    cc = torch.cat(c_crossattn, 1)
+        #    return self.diffusion_model(xc, t, context=cc)
         else:
             raise NotImplementedError(f"Conditioning key {self.conditioning_key} not supported")
             return None
