@@ -11,8 +11,8 @@ model:
       in_channels: 3
       out_ch: 3
       ch: 128
-      ch_mult: [1,1,1,1,1] # num_down = len(ch_mult) - 1
-      num_res_blocks: 1
+      ch_mult: [1,1,2,2,4] # num_down = len(ch_mult) - 1
+      num_res_blocks: 2
       attn_resolutions: [16]
       dropout: 0.0
 
@@ -27,15 +27,19 @@ model:
 data: 
   target: main.DataModuleFromConfig
   params:
-    batch_size: 8
+    batch_size: 1
     num_workers: 8
+    name: coco
     train:
-      target: bld.data.custom.CustomTrain
+      target: bld.data.custom.COCODataset
       params:
-        training_images_list_file: ./train.txt
+        training_images_folder_path: ./datasets/coco/train2017
+        ann_json: ./datasets/coco/annotations/captions_train2017.json
         size: 256
     validation: 
-      target: bld.data.custom.CustomTest
+      target: bld.data.custom.COCODataset
       params:
-        test_images_list_file: ./val.txt
+        training_images_folder_path: ./datasets/coco/val2017
+        ann_json: ./datasets/coco/annotations/captions_val2017.json
         size: 256
+

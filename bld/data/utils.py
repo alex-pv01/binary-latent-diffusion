@@ -3,6 +3,8 @@ import collections
 import torch
 from torch._six import string_classes
 from torch.utils.data._utils.collate import np_str_obj_array_pattern, default_collate_err_msg_format
+from torchvision import transforms
+import numpy as np
 
 from bld.data.helper_types import Annotation
 
@@ -45,3 +47,38 @@ def custom_collate(batch):
         return [custom_collate(samples) for samples in transposed]
     
     raise TypeError(default_collate_err_msg_format.format(elem_type))
+
+
+def coco_collate(batch):
+    """
+    Collate function for coco dataset loader
+    """
+    new_batch = list()
+    for elem in batch:
+        img, captions = elem['image'], elem['captions']
+        # Convert image to tensor
+        img = transforms.ToTensor()(img)
+        # Duplicate image for each caption
+        for caption in captions:
+            new_elem = dict()
+            new_elem['image'] = img
+            new_elem['caption'] = caption
+            new_batch.append(new_elem)
+    # Return collated batch
+    return new_batch
+
+
+def postprocess_image(image):
+    image = (image + 1.0) * 127.5
+    image = image.astype(np.uint8)
+    print(image.shape)
+    image = np.transpose(image, (1, 2, 0))
+    image = transforms.ToPILImage()(image)
+    print(image.size)
+    return image
+
+def save_image(image, name="test.png"):
+    image = postprocess_image(image)
+    # print image size
+    print(image.size)
+    image.save(name)

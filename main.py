@@ -16,7 +16,7 @@ from pytorch_lightning.callbacks import Callback, LearningRateMonitor, ModelChec
 from pytorch_lightning.utilities import rank_zero_only
 import wandb
 
-from bld.data.utils import custom_collate
+from bld.data.utils import custom_collate, coco_collate
 
 
 def get_obj_from_str(string, reload=False):
@@ -157,9 +157,13 @@ class WrappedDataset(Dataset):
 
 
 class DataModuleFromConfig(pl.LightningDataModule):
-    def __init__(self, batch_size, train=None, validation=None, test=None, wrap=False, num_workers=None):
+    def __init__(self, batch_size, name=None, train=None, validation=None, test=None, wrap=False, num_workers=None):
         super().__init__()
         self.batch_size = batch_size
+        if name == 'coco':
+            self.collate_fn = coco_collate
+        else:
+            self.collate_fn = custom_collate
         self.dataset_configs = dict()
         self.num_workers = num_workers if num_workers is not None else batch_size*2
         if train is not None:
@@ -192,7 +196,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             shuffle=True,
-            collate_fn=custom_collate
+            collate_fn=self.collate_fn
         )
     def _val_dataloader(self):
         return DataLoader(
@@ -200,7 +204,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             shuffle=False,
-            collate_fn=custom_collate
+            collate_fn=self.collate_fn
         )
     def _test_dataloader(self):
         return DataLoader(
@@ -208,7 +212,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             shuffle=False,
-            collate_fn=custom_collate
+            collate_fn=self.collate_fn
         )
 
 

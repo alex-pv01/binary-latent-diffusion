@@ -24,18 +24,18 @@ model:
         image_size: 16
         in_channels: 32
         out_channels: 32
-        model_channels: 32
+        model_channels: 64
         attention_resolutions:
-        - 1
+        - 2
         - 1
         num_res_blocks: 1
         channel_mult:
         - 1
-        - 1
-        num_heads: 4
+        - 2
+        num_heads: 8
         use_spatial_transformer: true
         transformer_depth: 1
-        context_dim: 32
+        context_dim: 1280
         use_checkpoint: true
         legacy: False
 
@@ -76,27 +76,23 @@ model:
 data: 
   target: main.DataModuleFromConfig
   params:
-    batch_size: 1
+    batch_size: 8
     num_workers: 8
+    name: coco
     train:
-      target: bld.data.custom.CustomTrain
+      target: bld.data.custom.COCODataset
       params:
-        training_images_list_file: ./train.txt
+        training_images_folder_path: ./datasets/coco/train2017
+        ann_json: ./datasets/coco/annotations/captions_train2017.json
         size: 256
     validation: 
-      target: bld.data.custom.CustomTest
+      target: bld.data.custom.COCODataset
       params:
-        test_images_list_file: ./val.txt
+        training_images_folder_path: ./datasets/coco/val2017
+        ann_json: ./datasets/coco/annotations/captions_val2017.json
         size: 256
 
-lightning:
-  callbacks:
-    image_logger:
-      target: main.ImageLogger
-      params:
-        batch_frequency: 5000
-        max_images: 8
-        increase_log_steps: False
+trainer:
+  num_epochs: 100
+  log_every_n_steps: 100
 
-  trainer:
-    benchmark: True

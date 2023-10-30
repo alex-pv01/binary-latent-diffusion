@@ -104,6 +104,7 @@ class BDDPM(pl.LightningModule):
 
         if monitor is not None:
             self.monitor = monitor
+        self.ckpt_path = ckpt_path
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys, only_model=load_only_unet)
 
@@ -145,7 +146,7 @@ class BDDPM(pl.LightningModule):
         assert alphas_cumprod.shape[0] == self.num_timesteps, 'alphas have to be defined for each timestep'
         assert bs.shape[0] == self.num_timesteps, 'bs have to be defined for each timestep'
 
-        to_torch = partial(torch.tensor, dtype=torch.float32)
+        to_torch = partial(torch.tensor, dtype=torch.float32, requires_grad=False)
 
         self.register_buffer('betas', to_torch(betas))
         self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
@@ -216,9 +217,9 @@ class BDDPM(pl.LightningModule):
         """
         assert t >= 0 and t < self.num_timesteps
         # torch tensor of shape as x_start but with all elements being self.alphas_cumprod[t]
-        kt = torch.full_like(x_start, self.alphas_cumprod[t])
+        kt = torch.full_like(x_start, self.alphas_cumprod[t].cpu().numpy()[0])
         # torch tensor of shape as x_start but with all elements being self.bs[t]
-        bt = torch.full_like(x_start, self.bs[t])
+        bt = torch.full_like(x_start, self.bs[t].cpu().numpy()[0])
         return kt * x_start + bt
     
 
@@ -464,6 +465,7 @@ class BinaryLatentDiffusion(BDDPM):
         self.concat_mode = concat_mode
         self.cond_stage_trainable = cond_stage_trainable
         self.cond_stage_key = cond_stage_key
+        self.first_stage_config = first_stage_config
         try:
             self.num_downs = len(first_stage_config.params.ddconfig.ch_mult) - 1
             latent_res = first_stage_config.params.ddconfig.resolution / self.num_downs
@@ -560,6 +562,7 @@ class BinaryLatentDiffusion(BDDPM):
         x = super().get_input(batch, k)
         if bs is not None:
             x = x[:bs]
+        x = x.to(self.device)
         encoder_posterior = self.encode_first_stage(x)
         z = self.get_first_stage_encoding(encoder_posterior).detach()
 
@@ -636,6 +639,7 @@ class BinaryLatentDiffusion(BDDPM):
                num_sample_steps=None,
                shape=None, 
                temp=1.0,
+               log_every_t=None,
                **kwargs):
         """
         Sample from the model.
@@ -646,6 +650,15 @@ class BinaryLatentDiffusion(BDDPM):
                 shape = (batch_size, *self.latent_shape)
             else:
                 shape = (batch_size, self.channels, self.image_size, self.image_size)
+
+        self.num_downs = len(self.first_stage_config.params.ddconfig.ch_mult) - 1
+        latent_res = int(self.first_stage_config.params.ddconfig.resolution / (2**self.num_downs))
+        self.latent_shape = tuple([self.first_stage_config.params.ddconfig.z_channels, latent_res, latent_res])
+
+        #FIX: shape is not correct
+
+        print("EEEEEEEEEEEEEEEEEEOOOOOOOOOOOOOOOO", shape)
+        print("EEEEEEEEEEEEEEEEEEOOOOOOOOOOOOOOOO", self.latent_shape)
 
         if cond is not None:
             #TODO: add conditioning
@@ -800,8 +813,7 @@ class BinaryLatentDiffusion(BDDPM):
                 if t % self.log_every_t == 0 or t == self.num_timesteps - 1:
                     t = repeat(torch.tensor([t]), '1 -> b', b=n_row)
                     t = t.to(self.device).long()
-                    noise = torch.randn_like(z_start)
-                    z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
+                    z_noisy = self.q_sample(x_start=z_start, t=t)
                     diffusion_row.append(self.decode_first_stage(z_noisy))
 
             diffusion_row = torch.stack(diffusion_row)  # n_log_step, n_row, C, H, W
