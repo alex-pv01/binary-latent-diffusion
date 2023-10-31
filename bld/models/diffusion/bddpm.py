@@ -61,7 +61,7 @@ class BDDPM(pl.LightningModule):
                  v_posterior=0.,  # weight for choosing posterior variance as sigma = (1-v) * beta_tilde + v * beta
                  l_simple_weight=1.,
                  conditioning_key=None,
-                 parameterization="zt+z0",  # all assuming fixed variance schedules
+                 parameterization="p_flip",  # all assuming fixed variance schedules
                  scheduler_config=None,
                  use_positional_encodings=False,
                  learn_logvar=False,
@@ -70,7 +70,7 @@ class BDDPM(pl.LightningModule):
                  ):
         super().__init__()
         #assert parameterization in ['prob', 'z0', 'zt+z0']
-        assert parameterization in ['zt+z0']
+        assert parameterization in ['p_flip']
         self.parameterization = parameterization
         print(f"{self.__class__.__name__}: Running in {self.parameterization}-prediction mode")
         self.cond_stage_model = None
@@ -98,8 +98,6 @@ class BDDPM(pl.LightningModule):
         self.original_elbo_weight = original_elbo_weight
         self.l_simple_weight = l_simple_weight
 
-        print("PRINTING DEVICE: ", device)
-
         #self.device = device
 
         if monitor is not None:
@@ -124,7 +122,7 @@ class BDDPM(pl.LightningModule):
         self.gamma = gamma
 
 
-    def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
+    def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=100,
                           linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
         if exists(given_betas):
             betas = given_betas
@@ -215,7 +213,6 @@ class BDDPM(pl.LightningModule):
         :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
         :return: A probability tensor of x_start's shape.
         """
-        assert t >= 0 and t < self.num_timesteps
         # torch tensor of shape as x_start but with all elements being self.alphas_cumprod[t]
         kt = torch.full_like(x_start, self.alphas_cumprod[t].cpu().numpy()[0])
         # torch tensor of shape as x_start but with all elements being self.bs[t]
@@ -235,8 +232,9 @@ class BDDPM(pl.LightningModule):
 
     def one_step(self, x, t):
         dim = x.ndim - 1
-        k = self.betas[t].view(-1, *([1]*dim))
-        x = x * k + 0.5 * (1-k)
+        beta = self.betas[t].view(-1, *([1]*dim))
+        print("beta: ", beta.shape)
+        x = x * (1 - beta) + 0.5 * beta
         return x
 
 
@@ -258,67 +256,98 @@ class BDDPM(pl.LightningModule):
         """
         # Sample x_t
         x_t = self.q_sample(x_start, t)
+        #print("x_t: ", x_t.shape)
         # Predict using the model
         pred = self.apply_model(x_t, t, cond)
+        #print("pred: ", pred.shape)
         # Compute the loss
         loss_dict = dict()
         #if self.parameterization == "prob":
         #    target = 
         #elif self.parameterization == "z0":
         #    target =
-        if self.parameterization == "zt+z0":
+        if self.parameterization == "p_flip":
             # Ensure pred is in [0, 1]
             p_flip = torch.sigmoid(pred)
+            #print("p_flip: ", p_flip.shape)
             # Compute zt xor z0
             xor = torch.logical_xor(x_start, x_t) * 1.0
+            #print("xor: ", xor.shape)
             # Compute BCE loss
             bce_loss = nn.functional.binary_cross_entropy_with_logits(p_flip, xor, reduction="none")
+            #print("bce_loss: ", bce_loss.shape)
+            #print("bce_loss: ", bce_loss.mean().shape)
             loss_dict["bce_loss"] = bce_loss.mean()
             # Compute L_residual loss
             p_residual = p_flip * xor + (1 - p_flip) * (1 - xor) # probability for computing expectation of the BCE loss
+            #print("p_residual: ", p_residual.shape)
             L_residual = bce_loss * (p_residual ** self.gamma)
+            #print("L_residual: ", L_residual.shape)
             L_residual = L_residual.mean()
+            #print("L_residual: ", L_residual)
             loss_dict["L_residual"] = L_residual
             # Compute predicted x_start, it is a samplig of p_0
             p_0 = (1 - x_t) * p_flip + x_t * (1 - p_flip)
+            #print("p_0: ", p_0.shape)
             p_0 = torch.clamp(p_0, 1e-7, 1 - 1e-7)
+            #print("p_0: ", p_0.shape)
             x_start_pred = torch.bernoulli(p_0)
+            #print("x_start_pred: ", x_start_pred.shape)
         else:
             raise NotImplementedError(f"Paramterization {self.parameterization} not yet supported")
 
         # Compute accuracy
         acc = (x_start_pred == x_start).float().mean()
+        #print("acc: ", acc.shape)
         loss_dict["acc"] = acc
         
         # Compute L_vlb loss
         if self.aux > 0:
-            ftr = (((t-1) == 0) * 1.0).view(-1, 1, 1)
+            ftr = (((t-1) == 0) * 1.0).view(-1, 1, 1, 1)
+            #print("ftr: ", ftr.shape)
 
             x_0_logits = torch.cat([x_start_pred.unsqueeze(-1), (1-x_start_pred).unsqueeze(-1)], dim=-1)
+            #print("x_0_logits: ", x_0_logits.shape)
             x_t_logits = torch.cat([x_t.unsqueeze(-1), (1-x_t).unsqueeze(-1)], dim=-1)
+            #print("x_t_logits: ", x_t_logits.shape)
 
             p_EV_qxtmin_x0 = self.q_post(x_0_logits, t-1)
+            #print("p_EV_qxtmin_x0: ", p_EV_qxtmin_x0.shape)
 
             q_one_step = self.one_step(x_t_logits, t)
+            #print("q_one_step: ", q_one_step.shape)
             unnormed_probs = p_EV_qxtmin_x0 * q_one_step
+            #print("unnormed_probs: ", unnormed_probs.shape)
             unnormed_probs = unnormed_probs / (unnormed_probs.sum(-1, keepdims=True)+1e-6)
+            #print("unnormed_probs: ", unnormed_probs.shape)
             unnormed_probs = unnormed_probs[...,0]
+            #print("unnormed_probs: ", unnormed_probs.shape)
             
             x_tm1_logits = unnormed_probs * (1-ftr) + x_start * ftr
+            #print("x_tm1_logits: ", x_tm1_logits.shape)
+
             x_0_gt = torch.cat([x_start.unsqueeze(-1), (1-x_start).unsqueeze(-1)], dim=-1)
+            #print("x_0_gt: ", x_0_gt.shape)
             p_EV_qxtmin_x0_gt = self.q_post(x_0_gt, t-1)
+            #print("p_EV_qxtmin_x0_gt: ", p_EV_qxtmin_x0_gt.shape)
             unnormed_gt = p_EV_qxtmin_x0_gt * q_one_step
+            #print("unnormed_gt: ", unnormed_gt.shape)
             unnormed_gt = unnormed_gt / (unnormed_gt.sum(-1, keepdims=True)+1e-6)
+            #print("unnormed_gt: ", unnormed_gt.shape)
             unnormed_gt = unnormed_gt[...,0]
+            #print("unnormed_gt: ", unnormed_gt.shape)
 
             x_tm1_gt = unnormed_gt
+            #print("x_tm1_gt: ", x_tm1_gt.shape)
 
             if torch.isinf(x_tm1_logits).max() or torch.isnan(x_tm1_logits).max():
                 pdb.set_trace()
             aux_loss = nn.functional.binary_cross_entropy(x_tm1_logits.clamp(min=1e-6, max=(1.0-1e-6)), x_tm1_gt.clamp(min=0.0, max=1.0), reduction='none')
-
+            #print("aux_loss: ", aux_loss.shape)
             L_vlb = aux_loss.mean()
+            #print("L_vlb: ", L_vlb.shape)
             L_total = self.aux * L_vlb + L_residual
+            #print("L_total: ", L_total.shape)
 
             loss_dict["L_vlb"] = L_vlb
             loss_dict["L_total"] = L_total
@@ -467,9 +496,9 @@ class BinaryLatentDiffusion(BDDPM):
         self.cond_stage_key = cond_stage_key
         self.first_stage_config = first_stage_config
         try:
-            self.num_downs = len(first_stage_config.params.ddconfig.ch_mult) - 1
-            latent_res = first_stage_config.params.ddconfig.resolution / self.num_downs
-            self.latent_shape = tuple(first_stage_config.params.ddconfig.z_channels, latent_res, latent_res)
+            self.num_downs = len(self.first_stage_config.params.ddconfig.ch_mult) - 1
+            latent_res = int(self.first_stage_config.params.ddconfig.resolution / (2**self.num_downs))
+            self.latent_shape = tuple([self.first_stage_config.params.ddconfig.z_channels, latent_res, latent_res])
         except:
             self.num_downs = 0
             self.latent_shape = None
@@ -620,6 +649,7 @@ class BinaryLatentDiffusion(BDDPM):
 
     def forward(self, x, c, *args, **kwargs):
         t = self.sample_time(x.shape[0], device=self.device)
+        #print("t: ", t)
         if self.model.conditioning_key is not None:
             assert c is not None
             if self.cond_stage_trainable:
@@ -651,15 +681,6 @@ class BinaryLatentDiffusion(BDDPM):
             else:
                 shape = (batch_size, self.channels, self.image_size, self.image_size)
 
-        self.num_downs = len(self.first_stage_config.params.ddconfig.ch_mult) - 1
-        latent_res = int(self.first_stage_config.params.ddconfig.resolution / (2**self.num_downs))
-        self.latent_shape = tuple([self.first_stage_config.params.ddconfig.z_channels, latent_res, latent_res])
-
-        #FIX: shape is not correct
-
-        print("EEEEEEEEEEEEEEEEEEOOOOOOOOOOOOOOOO", shape)
-        print("EEEEEEEEEEEEEEEEEEOOOOOOOOOOOOOOOO", self.latent_shape)
-
         if cond is not None:
             #TODO: add conditioning
             raise NotImplementedError("Conditioning not yet supported")
@@ -690,7 +711,7 @@ class BinaryLatentDiffusion(BDDPM):
             idx = np.array(idx * (self.num_timesteps-1), int)
             sampling_steps = sampling_steps[idx]
 
-        iterator = tqdm(reversed(range(num_sample_steps)), desc='Sampling t', total=num_sample_steps) if verbose else reversed(range(num_sample_steps))
+        iterator = tqdm(reversed(range(1, num_sample_steps)), desc='Sampling t', total=num_sample_steps) if verbose else reversed(range(num_sample_steps))
 
         z_t = z_T
         for i in iterator:
@@ -702,24 +723,33 @@ class BinaryLatentDiffusion(BDDPM):
             #    cond = self.q_sample(x_start=cond, t=tc)
 
             pred = self.apply_model(z_t, ts, cond)
+            #print("pred: ", pred.shape)
             p_flip = torch.sigmoid(pred)
+            #print("p_flip: ", p_flip.shape)
             # Control with temperature
             p_flip = p_flip / temp
+            #print("p_flip: ", p_flip.shape)
             # Compute p_0 given p_flip and z_t
             p_0 = (1 - z_t) * p_flip + z_t * (1 - p_flip)
+            #print("p_0: ", p_0.shape)   
             p_0 = torch.clamp(p_0, 1e-7, 1 - 1e-7)
             z_0 = torch.bernoulli(p_0)
+            #print("z_0: ", z_0.shape)
+            
+            #print("sampling_steps[i]: ", sampling_steps[i])
 
             # Compute z_t-1
-            if not sampling_steps[i][0].item() == 1:
-                t_p = torch.full((batch_size,), sampling_steps[i+1], device=device, dtype=torch.long)
+            if not sampling_steps[i] == 1:
+                t_p = torch.full((batch_size,), sampling_steps[i-1], device=device, dtype=torch.long)
                 z_0_logits = torch.cat([z_0.unsqueeze(-1), (1-z_0).unsqueeze(-1)], dim=-1)
                 z_t_logits = torch.cat([z_t.unsqueeze(-1), (1-z_t).unsqueeze(-1)], dim=-1)
 
                 p_EV_qztmin_z0 = self.q_post(z_0_logits, t_p)
                 q_one_step = z_t_logits
 
-                for mns in range(sampling_steps[i] - sampling_steps[i+1]):
+                for mns in range(1, sampling_steps[i] - sampling_steps[i-1]):
+                    print("mns: ", mns)
+                    print("sampling_steps[i] - mns: ", sampling_steps[i] - mns)
                     q_one_step = self.one_step(q_one_step, sampling_steps[i] - mns)
 
                 unnormed_probs = p_EV_qztmin_z0 * q_one_step
@@ -732,15 +762,18 @@ class BinaryLatentDiffusion(BDDPM):
                 z_tm1 = ()
             
             z_t = z_tm1
-            img = self.decode_first_stage(z_t)
+            #img = self.decode_first_stage(z_t)
 
             if i % log_every_t == 0 or i == num_sample_steps - 1:
-                intermediates.append(img)
+                #intermediates.append(img)
+                intermediates.append(z_t)
                 
         if return_intermediates:
-            return img, intermediates
+            #return img, intermediates
+            return z_t, intermediates        
         else:
-            return img
+            #return img
+            return z_t
     
     @torch.no_grad()
     def sample_log(self,cond,batch_size,ddim=False, ddim_steps=None,**kwargs):
@@ -828,10 +861,12 @@ class BinaryLatentDiffusion(BDDPM):
                 samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
                                                          ddim_steps=ddim_steps,eta=ddim_eta)
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
+            print("samples: ", samples.shape)
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
 
             if plot_denoise_rows:
+                raise NotImplementedError("Denoise rows not yet supported")
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
                 log["denoise_row"] = denoise_grid
 

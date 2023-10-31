@@ -475,7 +475,7 @@ def main():
             "wandb": {
                 "target": "pytorch_lightning.loggers.WandbLogger",
                 "params": {
-                    "project": "binary_autoencoding",
+                    "project": opt.project,
                     "name": nowname,
                     "save_dir": logdir,
                     "offline": opt.debug,
