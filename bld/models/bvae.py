@@ -5,31 +5,36 @@ import pytorch_lightning as pl
 from main import instantiate_from_config
 
 from bld.modules.model import Encoder, Decoder
-from bld.modules.quantize import BinaryQuantizer
+from bld.modules.quantize import BinaryQuantizer, BinaryVectorQuantizer
 
 
 class BVAEModel(pl.LightningModule):
     def __init__(self,
                  ddconfig,
                  lossconfig,
-                 n_embed,
-                 embed_dim,
+                 codebook_size=None,
+                 emb_dim=None,
                  ckpt_path=None,
                  ignore_keys=[],
                  image_key="image",
                  colorize_nlabels=None,
                  monitor=None,
-                 remap=None,
-                 sane_index_shape=False,  # tell vector quantizer to return indices as bhw
+                 quantize="binary",
                  ):
         super().__init__()
         self.image_key = image_key
         self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)
         self.loss = instantiate_from_config(lossconfig)
-        self.quantize = BinaryQuantizer()
-        self.quant_conv = torch.nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
-        self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
+        if quantize == "vector":
+            assert codebook_size is not None and emb_dim is not None, "Need to specify codebook_size and emb_dim for vector quantization."
+            raise NotImplementedError("Vector quantization not implemented yet.")
+            #TODO: Fix compatibility errors with pytorch lightning
+            self.quantize = BinaryVectorQuantizer(codebook_size=codebook_size, emb_dim=emb_dim, num_hiddens=ddconfig["z_channels"])
+        elif quantize == "binary":
+            self.quantize = BinaryQuantizer()
+        self.quant_conv = torch.nn.Conv2d(ddconfig["z_channels"], emb_dim, 1)
+        self.post_quant_conv = torch.nn.Conv2d(emb_dim, ddconfig["z_channels"], 1)
         self.ckpt_path = ckpt_path
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
@@ -77,6 +82,11 @@ class BVAEModel(pl.LightningModule):
         return dec
 
     def get_input(self, batch, k):
+        #print("Keys: ", batch.keys())
+        #print(type(batch))
+        #print(type(batch[k]))
+        #print(k)
+        #print(batch[k].shape)
         x = batch[k]
         if len(x.shape) == 3:
             x = x[..., None]
@@ -85,6 +95,7 @@ class BVAEModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         x = self.get_input(batch, self.image_key)
+        #xrec, codebook_loss = self(x)
         xrec = self(x)
 
         qloss = 0
@@ -93,9 +104,10 @@ class BVAEModel(pl.LightningModule):
             # autoencode
             aeloss, log_dict_ae = self.loss(x, xrec, optimizer_idx, self.global_step,
                                             last_layer=self.get_last_layer(), split="train")
-
+            #self.log("train/codebook_loss", codebook_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             self.log("train/aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=True)
+            #return aeloss + codebook_loss
             return aeloss
 
         if optimizer_idx == 1:
@@ -108,6 +120,7 @@ class BVAEModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x = self.get_input(batch, self.image_key)
+        #xrec, codebook_loss = self(x)
         xrec = self(x)
 
         aeloss, log_dict_ae = self.loss(x, xrec, 0, self.global_step,
@@ -115,10 +128,14 @@ class BVAEModel(pl.LightningModule):
 
         discloss, log_dict_disc = self.loss(x, xrec, 1, self.global_step,
                                             last_layer=self.get_last_layer(), split="val")
-        rec_loss = log_dict_ae["val/rec_loss"]
-        self.log("val/rec_loss", rec_loss,
-                   prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=True)
+        #rec_loss = log_dict_ae["val/rec_loss"]
+        #self.log("val/rec_loss", rec_loss,
+        #           prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=True)
+        # self.log("val/codebook_loss", codebook_loss,
+        #            prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=True)
         self.log("val/aeloss", aeloss,
+                   prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=True)
+        self.log("val/discloss", discloss,
                    prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=True)
         self.log_dict(log_dict_ae)
         self.log_dict(log_dict_disc)

@@ -7,9 +7,12 @@ from einops import repeat
 
 def make_beta_schedule(schedule, n_timestep, linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
     if schedule == "linear":
-        betas = (
-                torch.linspace(linear_start ** 0.5, linear_end ** 0.5, n_timestep, dtype=torch.float64) ** 2
-        )
+        # betas = (
+        #         torch.linspace(linear_start ** 0.5, linear_end ** 0.5, n_timestep, dtype=torch.float64) ** 2
+        # )
+        betas = 1 / (n_timestep - np.arange(1, n_timestep+1) + 1) 
+        # # Convert betas to torch tensor
+        betas = torch.from_numpy(betas)
 
     elif schedule == "cosine":
         timesteps = (
@@ -28,6 +31,7 @@ def make_beta_schedule(schedule, n_timestep, linear_start=1e-4, linear_end=2e-2,
     else:
         raise ValueError(f"schedule '{schedule}' unknown.")
     return betas.numpy()
+
 
 
 def checkpoint(func, inputs, params, flag):

@@ -1,7 +1,6 @@
 import collections
 
 import torch
-from torch._six import string_classes
 from torch.utils.data._utils.collate import np_str_obj_array_pattern, default_collate_err_msg_format
 from torchvision import transforms
 import numpy as np
@@ -30,7 +29,7 @@ def custom_collate(batch):
         return torch.tensor(batch, dtype=torch.float64)
     elif isinstance(elem, int): 
         return torch.tensor(batch)
-    elif isinstance(elem, string_classes):
+    elif isinstance(elem, str):
         return batch
     elif isinstance(elem, collections.abc.Mapping):
         return {key: custom_collate([d[key] for d in batch]) for key in elem}
@@ -53,17 +52,27 @@ def coco_collate(batch):
     """
     Collate function for coco dataset loader
     """
-    new_batch = list()
+    new_batch = dict()
+    new_captions = []
+    new_images = []
     for elem in batch:
         img, captions = elem['image'], elem['captions']
         # Convert image to tensor
         img = transforms.ToTensor()(img)
+        img = img.permute(1, 2, 0)
         # Duplicate image for each caption
-        for caption in captions:
-            new_elem = dict()
-            new_elem['image'] = img
-            new_elem['caption'] = caption
-            new_batch.append(new_elem)
+        img = img.repeat(len(captions), 1, 1, 1)
+        #print("img shape", img.shape)
+        # Stack new captions and images into a list
+        new_captions.extend(captions)
+        new_images.append(img)
+    # Convert list into tensor
+    new_images = torch.cat(new_images)
+    #print("new_images shape", new_images.shape)
+    # Add to batch
+    new_batch['image'] = new_images
+    new_batch['captions'] = new_captions
+            
     # Return collated batch
     return new_batch
 

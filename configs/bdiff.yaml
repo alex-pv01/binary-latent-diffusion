@@ -1,21 +1,21 @@
 model:
-  base_learning_rate: 5.0e-05
+  base_learning_rate: 1.0e-06
   target: bld.models.diffusion.bddpm.BinaryLatentDiffusion
   params:
     aux: 0.1
-    linear_start: 0.00085
-    linear_end: 1.0
+    alpha: 0.5
+    #linear_start: 0.0005
+    #linear_end: 0.0035
     num_timesteps_cond: 1
     log_every_t: 10
-    timesteps: 100
+    timesteps: 256
+    num_sample_steps: 100
     first_stage_key: image
     #cond_stage_key: caption
-    image_size: 32
-    channels: 4
     #cond_stage_trainable: true
     #conditioning_key: crossattn
-    monitor: val/loss_simple_ema
-    scale_factor: 0.18215
+    monitor: val/L_total
+    scale_factor: 1.0
     use_ema: False
 
     unet_config:
@@ -24,27 +24,27 @@ model:
         image_size: 16
         in_channels: 32
         out_channels: 32
-        model_channels: 32
+        model_channels: 128
         attention_resolutions:
         - 1
         - 1
-        num_res_blocks: 1
+        num_res_blocks: 6
         channel_mult:
         - 1
-        - 1
+        - 2
+        - 4
         num_heads: 4
-        use_spatial_transformer: true
-        transformer_depth: 1
-        context_dim: 32
+        use_spatial_transformer: False
+        transformer_depth: 2
+        #context_dim: 128
         use_checkpoint: true
         legacy: False
 
     first_stage_config:
       target: bld.models.bvae.BVAEModel
       params:
-        embed_dim: 32
-        n_embed: 1024
-        monitor: val/rec_loss
+        emb_dim: 32
+        #monitor: val/rec_loss
         ckpt_path: logs/2023-10-24T08-41-06_bvae_exp1/checkpoints/last.ckpt
         ddconfig:
           double_z: False
@@ -76,27 +76,27 @@ model:
 data: 
   target: main.DataModuleFromConfig
   params:
-    batch_size: 2
+    batch_size: 8
     num_workers: 8
     train:
       target: bld.data.custom.CustomTrain
       params:
-        training_images_list_file: ./train.txt
+        training_images_list_file: ./val.txt
         size: 256
     validation: 
       target: bld.data.custom.CustomTest
       params:
-        test_images_list_file: ./val.txt
+        test_images_list_file: ./test.txt
         size: 256
 
-lightning:
-  callbacks:
-    image_logger:
-      target: main.ImageLogger
-      params:
-        batch_frequency: 5000
-        max_images: 8
-        increase_log_steps: False
+# lightning:
+#   callbacks:
+#     image_logger:
+#       target: main.ImageLogger
+#       params:
+#         batch_frequency: 5000
+#         max_images: 8
+#         increase_log_steps: False
 
-  trainer:
-    benchmark: True
+#   trainer:
+#     benchmark: True

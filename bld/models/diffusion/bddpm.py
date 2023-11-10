@@ -1,5 +1,7 @@
+import os
 import torch 
 import torch.nn as nn
+import torchvision
 import numpy as np
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import LambdaLR
@@ -8,7 +10,9 @@ from functools import partial
 from contextlib import contextmanager
 from einops import rearrange, repeat
 from torchvision.utils import make_grid
+from torchvision import transforms
 from pytorch_lightning.utilities.distributed import rank_zero_only
+from PIL import Image
 
 import pdb
 
@@ -40,6 +44,7 @@ class BDDPM(pl.LightningModule):
                  unet_config,
                  aux=0,
                  gamma=1.,
+                 alpha=0.5,
                  timesteps=100,
                  beta_schedule="linear",
                  loss_type="l2",
@@ -83,6 +88,9 @@ class BDDPM(pl.LightningModule):
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
+        # Make sure all parameters require gradients
+        for param in self.model.parameters():
+            param.requires_grad = True
         self.total_params = count_params(self.model, verbose=True)
         self.use_ema = use_ema
         if self.use_ema:
@@ -106,28 +114,120 @@ class BDDPM(pl.LightningModule):
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys, only_model=load_only_unet)
 
-        self.register_schedule(given_betas=given_betas, beta_schedule=beta_schedule, timesteps=timesteps,
-                               linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
+        #self.register_schedule(given_betas=given_betas, beta_schedule=beta_schedule, timesteps=timesteps,
+        #                       linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
+
+        self.register_schedule(beta_schedule=beta_schedule, timesteps=timesteps)
 
         self.loss_type = loss_type
-
-        self.learn_logvar = learn_logvar
-        self.logvar = torch.full(fill_value=logvar_init, size=(self.num_timesteps,))
-        if self.learn_logvar:
-            self.logvar = nn.Parameter(self.logvar, requires_grad=True)
 
         # hyperparameter for balancing the sum of the loss terms
         self.aux = aux
         # hyperparameter for balancing the residual loss
         self.gamma = gamma
+        # hyperparameter for balancing the residual loss
+        self.alpha = alpha
 
 
-    def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=100,
-                          linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
+    def register_schedule_2(self, beta_schedule, timesteps):
+        if beta_schedule == 'linear':
+
+            beta = 1 - 1 / (timesteps - np.arange(1, timesteps+1) + 1) 
+
+            k_final = [1.0]
+            b_final = [0.0]
+
+            for i in range(timesteps):
+                k_final.append(k_final[-1]*beta[i])
+                b_final.append(beta[i] * b_final[-1] + 0.5 * (1-beta[i]))
+
+            k_final = k_final[1:]
+            b_final = b_final[1:]
+
+
+        elif beta_schedule == 'cos':
+
+            k_final = np.linspace(0.0, 1.0, timesteps+1)
+
+            k_final = k_final * np.pi
+            k_final = 0.5 + 0.5 * np.cos(k_final)
+            b_final = (1 - k_final) * 0.5
+
+            beta = []
+            for i in range(timesteps):
+                b = k_final[i+1] / k_final[i]
+                beta.append(b)
+            beta = np.array(beta)
+
+            k_final = k_final[1:]
+            b_final = b_final[1:]
+        
+        elif beta_schedule == 'sigmoid':
+            
+            def sigmoid(x):
+                z = 1/(1 + np.exp(-x))
+                return z
+
+            def sigmoid_schedule(t, start=-3, end=3, tau=1.0, clip_min=0.0):
+                # A gamma function based on sigmoid function.
+                v_start = sigmoid(start / tau)
+                v_end = sigmoid(end / tau)
+                output = sigmoid((t * (end - start) + start) / tau)
+                output = (v_end - output) / (v_end - v_start)
+                return np.clip(output, clip_min, 1.)
+            
+            k_final = np.linspace(0.0, 1.0, timesteps+1)
+            k_final = sigmoid_schedule(k_final, 0, 3, 0.8)
+            b_final = (1 - k_final) * 0.5
+
+            beta = []
+            for i in range(timesteps):
+                b = k_final[i+1] / k_final[i]
+                beta.append(b)
+            beta = np.array(beta)
+
+            k_final = k_final[1:]
+            b_final = b_final[1:]
+
+
+        else:
+            raise NotImplementedError
+        
+        k_final = np.hstack([1, k_final])
+        b_final = np.hstack([0, b_final])
+        beta = np.hstack([1, beta])
+        self.register_buffer('k_final', torch.Tensor(k_final))
+        self.register_buffer('b_final', torch.Tensor(b_final))
+        self.register_buffer('betas', torch.Tensor(beta))  
+        self.register_buffer('cumbeta', torch.cumprod(self.betas, 0))  
+        self.num_timesteps = int(timesteps)
+        # pdb.set_trace()
+
+        print(f'Noise scheduler with {beta_schedule}:')
+
+        print(f'Diffusion 1.0 -> 0.5:')
+        data = (1.0 * self.k_final + self.b_final).data.numpy()
+        print(' '.join([f'{d:0.4f}' for d in data]))
+
+        print(f'Diffusion 0.0 -> 0.5:')
+        data = (0.0 * self.k_final + self.b_final).data.numpy()
+        print(' '.join([f'{d:0.4f}' for d in data]))
+
+        print(f'Beta:')
+        print(' '.join([f'{d:0.4f}' for d in self.betas.data.numpy()]))
+
+
+
+    def register_schedule(self, beta_schedule="linear", timesteps=100,
+                          linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3, given_betas=None):
+        """
+        Deprecated
+        """
         if exists(given_betas):
             betas = given_betas
         else:
-            betas = make_beta_schedule(beta_schedule, timesteps, linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
+            betas = make_beta_schedule(schedule=beta_schedule, n_timestep=timesteps, linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
+        
         alphas = 1. - betas
         alphas_cumprod = np.cumprod(alphas, axis=0)
         alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
@@ -137,46 +237,36 @@ class BDDPM(pl.LightningModule):
             bs.append(alphas[i] * bs[i - 1] + 0.5 * betas[i])
         bs = np.array(bs)
 
-        timesteps, = betas.shape
+        beta_timesteps, = betas.shape
+        assert beta_timesteps==timesteps, f"beta_timesteps ({beta_timesteps}) != timesteps ({timesteps})"
         self.num_timesteps = int(timesteps)
         self.linear_start = linear_start
         self.linear_end = linear_end
         assert alphas_cumprod.shape[0] == self.num_timesteps, 'alphas have to be defined for each timestep'
         assert bs.shape[0] == self.num_timesteps, 'bs have to be defined for each timestep'
 
-        to_torch = partial(torch.tensor, dtype=torch.float32, requires_grad=False)
+        to_torch = partial(torch.tensor, dtype=torch.float32)
 
         self.register_buffer('betas', to_torch(betas))
         self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
         self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
         self.register_buffer('bs', to_torch(bs))
 
-        #if self.parameterization == "prob":
-            # create a torch tensor of ones with the same shape as self.betas
-        lvlb_weights = torch.ones_like(self.betas + 1, dtype=torch.float32)
-        #elif self.parameterization == "x0":
-        #    lvlb_weights = 0.5 * np.sqrt(torch.Tensor(alphas_cumprod)) / (2. * 1 - torch.Tensor(alphas_cumprod))
-        #else:
-        #    raise NotImplementedError("mu not supported")
-        # TODO how to choose this term
-        lvlb_weights[0] = -1.
-        self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
-        assert not torch.isnan(self.lvlb_weights).all()
 
-    @contextmanager
-    def ema_scope(self, context=None):
-        if self.use_ema:
-            self.model_ema.store(self.model.parameters())
-            self.model_ema.copy_to(self.model)
-            if context is not None:
-                print(f"{context}: Switched to EMA weights")
-        try:
-            yield None
-        finally:
-            if self.use_ema:
-                self.model_ema.restore(self.model.parameters())
-                if context is not None:
-                    print(f"{context}: Restored training weights")
+    # @contextmanager
+    # def ema_scope(self, context=None):
+    #     if self.use_ema:
+    #         self.model_ema.store(self.model.parameters())
+    #         self.model_ema.copy_to(self.model)
+    #         if context is not None:
+    #             print(f"{context}: Switched to EMA weights")
+    #     try:
+    #         yield None
+    #     finally:
+    #         if self.use_ema:
+    #             self.model_ema.restore(self.model.parameters())
+    #             if context is not None:
+    #                 print(f"{context}: Restored training weights")
 
 
     def init_from_ckpt(self, ckpt_path, ignore_keys=[], only_model=False):
@@ -194,50 +284,94 @@ class BDDPM(pl.LightningModule):
             print(f"Unexpected Keys: {unexpected}")
 
 
-    def sample_time(self, batch_size, device=None):
+    def sample_time(self, batch_size, device):
         """
         Sample a time step from the diffusion process.
         :param batch_size: the number of samples to generate.
         :param device: the torch device to use.
         :return: A tensor of shape [batch_size] of sampled time steps.
         """
-        if device is None:
-            device = self.device
-        return torch.randint(1, self.num_timesteps, (batch_size,), device=device).long()
+        return torch.randint(0, self.num_timesteps, (batch_size,), device=device).long()
 
 
-    def q_post(self, x_start, t):
+    def q_post_2(self, x_start, t):
         """
         Get the posterior probability of the Bernoulli distribution q(x_t | x_0, x_T).
         :param x_start: the [N x C x ...] tensor of noiseless inputs.
         :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
         :return: A probability tensor of x_start's shape.
         """
+        dim = x_start.ndim - 1
+        kt = self.k_final[t].view(-1, *([1]*dim))
+        bt = self.b_final[t].view(-1, *([1]*dim))
+        return kt * x_start + bt
+
+    def q_post(self, x_start, t):
+        """
+        Deprecated
+        """
         # torch tensor of shape as x_start but with all elements being self.alphas_cumprod[t]
-        kt = torch.full_like(x_start, self.alphas_cumprod[t].cpu().numpy()[0])
+        # kt = torch.full_like(x_start, self.alphas_cumprod[t].cpu().numpy()[0])
         # torch tensor of shape as x_start but with all elements being self.bs[t]
-        bt = torch.full_like(x_start, self.bs[t].cpu().numpy()[0])
+        # bt = torch.full_like(x_start, self.bs[t].cpu().numpy()[0])
+        #kt = self.alphas_cumprod[t]
+        #bt = torch.full(x_start.shape, self.bs[t])
+        bs = []
+        ks = []
+        sh = x_start[0].shape
+        for b, k in zip(self.bs[t], self.alphas_cumprod[t]):
+            b_t = torch.full(sh, b)
+            k_t = torch.full(sh, k)
+            bs.append(b_t)
+            ks.append(k_t)
+        bt = torch.stack(bs).to(x_start.device)
+        kt = torch.stack(ks).to(x_start.device)
+        # bt = self.bs[t]
         return kt * x_start + bt
     
 
-    def q_sample(self, x_start, t):
+    def q_sample(self, x_start, t, return_logits=False):
         """
         Sample from the posterior distribution q(x_t | x_0, x_T).
         :param x_start: the [N x C x ...] tensor of noiseless inputs.
         :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
         :return: A sample tensor of x_start's shape.
         """
-        return torch.bernoulli(self.q_post(x_start, t))
+        logits = self.q_post(x_start, t)
+        sample = torch.bernoulli(logits)
+        if return_logits:
+            return sample, logits
+        return sample
 
 
     def one_step(self, x, t):
-        dim = x.ndim - 1
-        beta = self.betas[t].view(-1, *([1]*dim))
-        print("beta: ", beta.shape)
-        x = x * (1 - beta) + 0.5 * beta
+        # dim = x.ndim - 1
+        # beta = self.betas[t].view(-1, *([1]*dim))
+        # print(beta)
+        #print("beta: ", beta.shape)
+        # x = x * (1 - beta) + 0.5 * beta
+        # print("x: ", x.shape)
+        # print("t: ", t)
+        # print("self.betas[t]: ", self.betas[t])
+        # print("self.betas[t]: ", self.betas[t].shape)
+        # print("self.betas: ", self.betas)
+        # #beta = self.betas[t]
+        # Multiply by beta of size [4] with x of size [4, 3, 256, 256]
+        #beta = beta.view(-1, *([1]*3))
+        betass = []
+        sh = x[0].shape
+        for beta in self.betas[t]:
+            beta_t = torch.full(sh, beta)
+            betass.append(beta_t)
+        betas_ = torch.stack(betass).to(x.device)
+        # print(betas_.shape)
+        # print("beta: ", betas_.shape)
+        x = x * (1 - betas_) + 0.5 * betas_
+        # print("x: ", x.shape)
+        #x = x * (1 - self.betas[t]) + 0.5 * self.betas[t]
         return x
 
-
+    
     def apply_model(self, x_start, t, cond=None):
         """
         Apply the model to a noiseless input x_start.
@@ -254,11 +388,14 @@ class BDDPM(pl.LightningModule):
         """
         Compute the loss of the model.
         """
+        log_prefix = 'train' if self.training else 'val'
         # Sample x_t
-        x_t = self.q_sample(x_start, t)
-        #print("x_t: ", x_t.shape)
+        x_t, logits = self.q_sample(x_start, t, return_logits=True)
+        # print("x_t: ", x_t.shape)
+        # print("x_t: ", x_t)
+        # print("logits: ", logits)
         # Predict using the model
-        pred = self.apply_model(x_t, t, cond)
+        pred = self.apply_model(x_t, t-1, cond)
         #print("pred: ", pred.shape)
         # Compute the loss
         loss_dict = dict()
@@ -270,29 +407,49 @@ class BDDPM(pl.LightningModule):
             # Ensure pred is in [0, 1]
             p_flip = torch.sigmoid(pred)
             #print("p_flip: ", p_flip.shape)
+
             # Compute zt xor z0
             xor = torch.logical_xor(x_start, x_t) * 1.0
-            #print("xor: ", xor.shape)
-            # Compute BCE loss
-            bce_loss = nn.functional.binary_cross_entropy_with_logits(p_flip, xor, reduction="none")
+            # print("xor: ", xor.shape)
+            # print("pred: ", pred)
+            # print("xor: ", xor)
+            # print("t", t)
+            # Compute BCE loss (use pred instead of p_flip to avoid numerical instabilities)
+            bce_loss = nn.functional.binary_cross_entropy_with_logits(pred, xor, reduction="none")
+            # Compute MSE loss
+            mse_loss = nn.functional.mse_loss(pred, xor, reduction="none")
             #print("bce_loss: ", bce_loss.shape)
             #print("bce_loss: ", bce_loss.mean().shape)
-            loss_dict["bce_loss"] = bce_loss.mean()
+            loss_dict.update({f'{log_prefix}/bce_loss': bce_loss.mean()})
+            loss_dict.update({f'{log_prefix}/mse_loss': mse_loss.mean()})
             # Compute L_residual loss
             p_residual = p_flip * xor + (1 - p_flip) * (1 - xor) # probability for computing expectation of the BCE loss
+            p_residual = 1 - p_residual
             #print("p_residual: ", p_residual.shape)
             L_residual = bce_loss * (p_residual ** self.gamma)
+            if self.alpha == -1:
+                neg_weight = xor.sum((-1,-2))
+                neg_weight = neg_weight / xor[0].numel()
+                neg_weight = neg_weight.view(-1, 1, 1)
+                alpha_t = (1 - neg_weight) * xor + neg_weight * (1 - xor)
+                L_residual = alpha_t * L_residual
+            elif self.alpha > 0:
+                alpha_t = self.alpha * xor + (1 - self.alpha) * (1 - xor)
+                L_residual = alpha_t * L_residual
             #print("L_residual: ", L_residual.shape)
             L_residual = L_residual.mean()
             #print("L_residual: ", L_residual)
-            loss_dict["L_residual"] = L_residual
+            loss_dict.update({f'{log_prefix}/L_residual': L_residual})
             # Compute predicted x_start, it is a samplig of p_0
             p_0 = (1 - x_t) * p_flip + x_t * (1 - p_flip)
             #print("p_0: ", p_0.shape)
-            p_0 = torch.clamp(p_0, 1e-7, 1 - 1e-7)
+            #p_0 = torch.clamp(p_0, 1e-7, 1 - 1e-7)
             #print("p_0: ", p_0.shape)
             x_start_pred = torch.bernoulli(p_0)
             #print("x_start_pred: ", x_start_pred.shape)
+
+            L_total = L_residual #+ mse_loss.mean() * 0.1
+            #L_total = mse_loss.mean()
         else:
             raise NotImplementedError(f"Paramterization {self.parameterization} not yet supported")
 
@@ -346,16 +503,28 @@ class BDDPM(pl.LightningModule):
             #print("aux_loss: ", aux_loss.shape)
             L_vlb = aux_loss.mean()
             #print("L_vlb: ", L_vlb.shape)
-            L_total = self.aux * L_vlb + L_residual
+            L_total = self.aux * L_vlb + L_residual #+ mse_loss.mean() * 0.1
             #print("L_total: ", L_total.shape)
+            
+            loss_dict.update({f'{log_prefix}/L_vlb': L_vlb})
 
-            loss_dict["L_vlb"] = L_vlb
-            loss_dict["L_total"] = L_total
+        loss_dict.update({f'{log_prefix}/L_total': L_total})
 
-            return L_total, loss_dict
+        acc = (x_start_pred == x_start).float().mean()
+        image = self.decode_first_stage(x_start_pred)
+        #print("acc: ", acc)
+        grid = torchvision.utils.make_grid(image, nrow=4)
+        grid = (grid + 1.0) / 2.0
+        grid = grid.transpose(0,1).transpose(1,2).squeeze(-1)
+        grid = grid.cpu().detach().numpy()
+        grid = (grid * 255).astype(np.uint8)
+        # make sure values are in range 0-255
+        grid = np.clip(grid, 0, 255)
+        filename = "image4.png"
+        path = os.path.join("/home/apujol/binary-latent-diffusion", filename)
+        Image.fromarray(grid).save(path)
         
-        else:
-            return L_residual, loss_dict
+        return L_total, loss_dict
 
 
     def forward(self, x, *args, **kwargs):
@@ -396,16 +565,12 @@ class BDDPM(pl.LightningModule):
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         _, loss_dict_no_ema = self.shared_step(batch)
-        with self.ema_scope():
-            _, loss_dict_ema = self.shared_step(batch)
-            loss_dict_ema = {key + '_ema': loss_dict_ema[key] for key in loss_dict_ema}
         self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
-        self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
 
-    def on_train_batch_end(self, *args, **kwargs):
-        if self.use_ema:
-            self.model_ema(self.model)
+    # def on_train_batch_end(self, *args, **kwargs):
+    #     if self.use_ema:
+    #         self.model_ema(self.model)
 
 
     def _get_rows_from_list(self, samples):
@@ -440,9 +605,7 @@ class BDDPM(pl.LightningModule):
         log["diffusion_row"] = self._get_rows_from_list(diffusion_row)
 
         if sample:
-            # get denoise row
-            with self.ema_scope("Plotting"):
-                samples, denoise_row = self.sample(batch_size=N, return_intermediates=True)
+            samples, denoise_row = self.sample(batch_size=N, return_intermediates=True)
             log["samples"] = samples
             log["denoise_row"] = self._get_rows_from_list(denoise_row)
 
@@ -472,6 +635,7 @@ class BinaryLatentDiffusion(BDDPM):
                  first_stage_config,
                  cond_stage_config,
                  num_timesteps_cond=None,
+                 num_sample_steps=None,
                  cond_stage_key="caption",
                  cond_stage_trainable=False,
                  concat_mode=True,
@@ -510,7 +674,7 @@ class BinaryLatentDiffusion(BDDPM):
         self.instantiate_cond_stage(cond_stage_config)
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
-
+        self.num_sample_steps = num_sample_steps
         self.restarted_from_ckpt = False
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
@@ -530,7 +694,8 @@ class BinaryLatentDiffusion(BDDPM):
                           linear_start=0.0001, 
                           linear_end=0.02, 
                           cosine_s=0.008):
-        super().register_schedule(given_betas, beta_schedule, timesteps, linear_start, linear_end, cosine_s)
+        #super().register_schedule(given_betas, beta_schedule, timesteps, linear_start, linear_end, cosine_s)
+        super().register_schedule(beta_schedule, timesteps)
         self.shorten_cond_schedule = self.num_timesteps_cond > 1
         if self.shorten_cond_schedule:
             self.make_cond_schedule()
@@ -592,11 +757,13 @@ class BinaryLatentDiffusion(BDDPM):
         if bs is not None:
             x = x[:bs]
         x = x.to(self.device)
-        encoder_posterior = self.encode_first_stage(x)
-        z = self.get_first_stage_encoding(encoder_posterior).detach()
+        #encoder_posterior = self.encode_first_stage(x)
+        #z = self.get_first_stage_encoding(encoder_posterior).detach()
+        z = self.encode_first_stage(x).detach()
 
         #TODO: add conditioning
         if self.model.conditioning_key is not None:
+            print("Conditioning key: ", self.model.conditioning_key)
             raise NotImplementedError("Conditioning not yet supported")
             pass
         else:
@@ -643,8 +810,8 @@ class BinaryLatentDiffusion(BDDPM):
         Compute the loss of the model.
         """
         x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c)
-        return loss
+        loss, loss_dict = self(x, c)
+        return loss, loss_dict
 
 
     def forward(self, x, c, *args, **kwargs):
@@ -661,15 +828,14 @@ class BinaryLatentDiffusion(BDDPM):
 
     @torch.no_grad()
     def sample(self,
-               cond=None,
                batch_size=16,
-               return_intermediates=False,
                z_T=None,
-               verbose=True,
-               num_sample_steps=None,
                shape=None, 
+               return_intermediates=False,
                temp=1.0,
                log_every_t=None,
+               cond=None,
+               verbose=True,
                **kwargs):
         """
         Sample from the model.
@@ -697,34 +863,29 @@ class BinaryLatentDiffusion(BDDPM):
         else:
             z_T = torch.bernoulli(z_T).to(device)
 
-        img = self.decode_first_stage(z_T)
+        intermediates = [z_T]
 
-        intermediates = [img]
-
-        if num_sample_steps is None:
-            num_sample_steps = self.num_timesteps
+        if self.num_sample_steps is None:
+            self.num_sample_steps = self.num_timesteps
 
         sampling_steps = np.array(range(1, self.num_timesteps+1))
 
-        if num_sample_steps != self.num_timesteps:
-            idx = np.linspace(0.0, 1.0, num_sample_steps)
+        if self.num_sample_steps != self.num_timesteps:
+            idx = np.linspace(0.0, 1.0, self.num_sample_steps)
             idx = np.array(idx * (self.num_timesteps-1), int)
             sampling_steps = sampling_steps[idx]
 
-        iterator = tqdm(reversed(range(1, num_sample_steps)), desc='Sampling t', total=num_sample_steps) if verbose else reversed(range(num_sample_steps))
+        iterator = tqdm(reversed(range(1, self.num_sample_steps)), desc='Sampling t', total=self.num_sample_steps) if verbose else reversed(range(self.num_sample_steps))
 
         z_t = z_T
         for i in iterator:
             ts = torch.full((batch_size,), sampling_steps[i], device=device, dtype=torch.long)
-
-            #if self.shorten_cond_schedule:
-            #    assert self.model.conditioning_key != 'hybrid'
-            #    tc = self.cond_ids[ts].to(cond.device)
-            #    cond = self.q_sample(x_start=cond, t=tc)
-
+            #print("ts: ", ts)
             pred = self.apply_model(z_t, ts, cond)
+            #print("pred: ", pred)
             #print("pred: ", pred.shape)
             p_flip = torch.sigmoid(pred)
+            #print("p_flip: ", p_flip)
             #print("p_flip: ", p_flip.shape)
             # Control with temperature
             p_flip = p_flip / temp
@@ -732,7 +893,6 @@ class BinaryLatentDiffusion(BDDPM):
             # Compute p_0 given p_flip and z_t
             p_0 = (1 - z_t) * p_flip + z_t * (1 - p_flip)
             #print("p_0: ", p_0.shape)   
-            p_0 = torch.clamp(p_0, 1e-7, 1 - 1e-7)
             z_0 = torch.bernoulli(p_0)
             #print("z_0: ", z_0.shape)
             
@@ -741,16 +901,21 @@ class BinaryLatentDiffusion(BDDPM):
             # Compute z_t-1
             if not sampling_steps[i] == 1:
                 t_p = torch.full((batch_size,), sampling_steps[i-1], device=device, dtype=torch.long)
-                z_0_logits = torch.cat([z_0.unsqueeze(-1), (1-z_0).unsqueeze(-1)], dim=-1)
+                z_0_logits = torch.cat([p_0.unsqueeze(-1), (1-p_0).unsqueeze(-1)], dim=-1)
                 z_t_logits = torch.cat([z_t.unsqueeze(-1), (1-z_t).unsqueeze(-1)], dim=-1)
-
+                # print("z_0_logits: ", z_0_logits.shape)
+                # print("z_t_logits: ", z_t_logits.shape)
+                # print("t_p: ", t_p.shape)
+                # print("t_p: ", t_p)
                 p_EV_qztmin_z0 = self.q_post(z_0_logits, t_p)
+                # print("p_EV_qztmin_z0: ", p_EV_qztmin_z0.shape)
                 q_one_step = z_t_logits
 
                 for mns in range(1, sampling_steps[i] - sampling_steps[i-1]):
-                    print("mns: ", mns)
-                    print("sampling_steps[i] - mns: ", sampling_steps[i] - mns)
-                    q_one_step = self.one_step(q_one_step, sampling_steps[i] - mns)
+                    #print("mns: ", mns)
+                    #print("sampling_steps[i] - mns: ", sampling_steps[i] - mns)
+                    t_s = torch.full((batch_size,), sampling_steps[i] - mns, device=device, dtype=torch.long)
+                    q_one_step = self.one_step(q_one_step, t_s)
 
                 unnormed_probs = p_EV_qztmin_z0 * q_one_step
                 unnormed_probs = unnormed_probs / unnormed_probs.sum(-1, keepdims=True)
@@ -758,13 +923,17 @@ class BinaryLatentDiffusion(BDDPM):
                 
                 z_tm1_logits = unnormed_probs
                 z_tm1 = torch.bernoulli(z_tm1_logits)
+
+                aux = z_t - z_tm1
+                #print("aux: ", aux)
+                #print("z_t: ", z_t)
             else: 
                 z_tm1 = ()
             
             z_t = z_tm1
             #img = self.decode_first_stage(z_t)
 
-            if i % log_every_t == 0 or i == num_sample_steps - 1:
+            if i % log_every_t == 0 or i == self.num_sample_steps - 1:
                 #intermediates.append(img)
                 intermediates.append(z_t)
                 
@@ -776,7 +945,7 @@ class BinaryLatentDiffusion(BDDPM):
             return z_t
     
     @torch.no_grad()
-    def sample_log(self,cond,batch_size,ddim=False, ddim_steps=None,**kwargs):
+    def sample_log(self,cond,batch_size, ddim=False, ddim_steps=None,**kwargs):
 
         if ddim:
             #TODO: implement ddim
@@ -801,9 +970,9 @@ class BinaryLatentDiffusion(BDDPM):
                    return_keys=None,
                    latent_images=False, 
                    inpaint=False, 
-                   plot_denoise_rows=False, 
+                   plot_denoise_rows=True, 
                    plot_progressive_rows=False,
-                   plot_diffusion_rows=True, 
+                   plot_diffusion_rows=False, 
                    **kwargs):
         """
         
@@ -818,10 +987,16 @@ class BinaryLatentDiffusion(BDDPM):
                                            return_original_cond=True,
                                            bs=N)
 
+        # print("z: ", z)
+        # print("c: ", c)
+        # print("x: ", x)
+        # print("xrec: ", xrec)
+        # print("xc: ", xc)
+
         N = min(x.shape[0], N)
         n_row = min(x.shape[0], n_row)
-        log["inputs"] = x
-        log["reconstruction"] = xrec
+        #log["inputs"] = x
+        #log["reconstruction"] = xrec
 
         if self.model.conditioning_key is not None:
             if hasattr(self.cond_stage_model, "decode"):
@@ -841,33 +1016,56 @@ class BinaryLatentDiffusion(BDDPM):
         if plot_diffusion_rows:
             # get diffusion row
             diffusion_row = list()
+            percentage = list()
+            logits_list = list()
+            acc = list()
             z_start = z[:n_row]
             for t in range(self.num_timesteps):
                 if t % self.log_every_t == 0 or t == self.num_timesteps - 1:
                     t = repeat(torch.tensor([t]), '1 -> b', b=n_row)
                     t = t.to(self.device).long()
-                    z_noisy = self.q_sample(x_start=z_start, t=t)
+                    z_noisy, logits = self.q_sample(x_start=z_start, t=t, return_logits=True)
+                    percentage.append(z_noisy.mean().item())
+                    logits_list.append(logits.mean().item())
                     diffusion_row.append(self.decode_first_stage(z_noisy))
+                
+                    acc.append((z_noisy == z_start).float().mean())
 
             diffusion_row = torch.stack(diffusion_row)  # n_log_step, n_row, C, H, W
             diffusion_grid = rearrange(diffusion_row, 'n b c h w -> b n c h w')
             diffusion_grid = rearrange(diffusion_grid, 'b n c h w -> (b n) c h w')
             diffusion_grid = make_grid(diffusion_grid, nrow=diffusion_row.shape[0])
             log["diffusion_row"] = diffusion_grid
+            # print("")
+            # print("Diffusion row")
+            # print("Percentage: ", percentage)
+            # print("")
+            # print("Logits: ", logits_list)
+            # print("")
+            # print("Last logits: ", logits)
+            # print("")
+            # print("Last z_noisy: ", z_noisy)
+            # print("")
+            # print("Last z_start: ", z_start)
+            # print("")
+            # print("Acc: ", acc)
+            # print("")
+
 
         if sample:
             # get denoise row
-            with self.ema_scope("Plotting"):
-                samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
-                                                         ddim_steps=ddim_steps,eta=ddim_eta)
-                # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
-            print("samples: ", samples.shape)
+            samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
+                                                        ddim_steps=ddim_steps,eta=ddim_eta)
+            # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
+            # print("samples: ", samples.shape)
+            # print("samples: ", samples)
+            # print("z_denoise_row: ", len(z_denoise_row))
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
 
             if plot_denoise_rows:
-                raise NotImplementedError("Denoise rows not yet supported")
-                denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
+                #raise NotImplementedError("Denoise rows not yet supported")
+                denoise_grid = self._get_denoise_row_from_list(samples=z_denoise_row)
                 log["denoise_row"] = denoise_grid
 
             if latent_images:
@@ -913,6 +1111,19 @@ class BinaryLatentDiffusion(BDDPM):
                 return {key: log[key] for key in return_keys}
         return log
 
+    
+    def _get_denoise_row_from_list(self, samples, desc=''):
+        denoise_row = []
+        for zd in tqdm(samples, desc=desc):
+            #print("zd: ", zd.shape)
+            denoise_row.append(self.decode_first_stage(zd))
+        n_imgs_per_row = len(denoise_row)
+        denoise_row = torch.stack(denoise_row)  # n_log_step, n_row, C, H, W
+        denoise_grid = rearrange(denoise_row, 'n b c h w -> b n c h w')
+        denoise_grid = rearrange(denoise_grid, 'b n c h w -> (b n) c h w')
+        denoise_grid = make_grid(denoise_grid, nrow=n_imgs_per_row)
+        return denoise_grid
+
     @torch.no_grad()
     def to_rgb(self, x):
         x = x.float()
@@ -929,9 +1140,6 @@ class BinaryLatentDiffusion(BDDPM):
         if self.cond_stage_trainable:
             print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
             params = params + list(self.cond_stage_model.parameters())
-        if self.learn_logvar:
-            print('Diffusion model optimizing logvar')
-            params.append(self.logvar)
         opt = torch.optim.AdamW(params, lr=lr)
         if self.use_scheduler:
             assert 'target' in self.scheduler_config

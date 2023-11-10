@@ -1,13 +1,22 @@
 trash
+wandb
+environment2.yaml
 
 # Data
 datasets
 train.txt
 val.txt
 test.txt
+exp.txt
+exp2.txt
+exp3.txt
 
 # Saves
 logs
+image.png
+image2.png
+image3.png
+image4.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
