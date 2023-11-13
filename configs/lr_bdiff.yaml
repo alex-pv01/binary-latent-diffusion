@@ -1,0 +1,87 @@
+model:
+  base_learning_rate: 1.0
+  target: bld.models.diffusion.bddpm.BinaryLatentDiffusion
+  params:
+    aux: 0.1
+    alpha: 0.5
+    num_timesteps_cond: 1
+    log_every_t: 10
+    timesteps: 256
+    num_sample_steps: 100
+    first_stage_key: image
+    monitor: val/L_total
+    scale_factor: 1.0
+    use_ema: False
+    
+    scheduler_config: 
+      target: bld.modules.lr_scheduler.LambdaLinearScheduler
+      params:
+        warm_up_steps: 10000
+        cycle_lengths: 10000000000000
+        f_start: 1.0e-06
+        f_max: 1.0
+        f_min: 1.0
+
+    unet_config:
+      target: bld.modules.diffusionmodules.openaimodel.UNetModel
+      params:
+        image_size: 16
+        in_channels: 32
+        out_channels: 32
+        model_channels: 128
+        attention_resolutions:
+        - 1
+        - 1
+        num_res_blocks: 6
+        channel_mult:
+        - 1
+        - 2
+        - 4
+        num_heads: 4
+        use_spatial_transformer: False
+        transformer_depth: 2
+        use_checkpoint: true
+        legacy: False
+
+    first_stage_config:
+      target: bld.models.bvae.BVAEModel
+      params:
+        emb_dim: 32
+        ckpt_path: logs/2023-10-24T08-41-06_bvae_exp1/checkpoints/last.ckpt
+        ddconfig:
+          double_z: False
+          z_channels: 32
+          resolution: 256
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult:
+          - 1
+          - 1
+          - 2
+          - 2
+          - 4
+          num_res_blocks: 2
+          attn_resolutions: [16]
+          dropout: 0.0
+        lossconfig:
+          target: torch.nn.Identity
+    cond_stage_config: __is_unconditional__
+
+
+data: 
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 8
+    num_workers: 8
+    train:
+      target: bld.data.custom.CustomTrain
+      params:
+        training_images_list_file: ./val.txt
+        size: 256
+    validation: 
+      target: bld.data.custom.CustomTest
+      params:
+        test_images_list_file: ./test.txt
+        size: 256
+

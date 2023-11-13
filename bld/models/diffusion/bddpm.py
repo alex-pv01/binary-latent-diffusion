@@ -935,11 +935,12 @@ class BinaryLatentDiffusion(BDDPM):
 
             if i % log_every_t == 0 or i == self.num_sample_steps - 1:
                 #intermediates.append(img)
-                intermediates.append(z_t)
+                #intermediates.append(z_0)
+                intermediates.append(z_0)
                 
         if return_intermediates:
             #return img, intermediates
-            return z_t, intermediates        
+            return z_t, intermediates 
         else:
             #return img
             return z_t
